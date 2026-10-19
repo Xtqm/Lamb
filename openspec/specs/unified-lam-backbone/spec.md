@@ -33,3 +33,10 @@ The system SHALL scale within ~45M total parameters and ~14M active parameters p
 #### Scenario: Hardware envelope verification
 - **WHEN** the full `JEDM2Model` executes sequence forward and backward passes with sequence length 1024 on CUDA in `bfloat16`
 - **THEN** total parameters remain within $45\text{M} \pm 5\text{M}$, active parameters remain within $14\text{M} \pm 3\text{M}$, peak VRAM remains below 2.0 GB, and all gradients are free of NaNs or Infinities
+
+### Requirement: Selective Gradient Checkpointing Support
+The system SHALL provide selective activation checkpointing across the stacked JEDM2Block layers within JEDM2Model to constrain backpropagation activation memory at long sequence lengths.
+
+#### Scenario: Checkpointed sequence forward and backward pass
+- **WHEN** gradient checkpointing is enabled on JEDM2Model and a sequence of length 2048 is evaluated through backward pass on CUDA in bfloat16
+- **THEN** intermediate activations are recomputed during backward pass, gradients are computed without NaNs or Infs, and peak activation memory is reduced compared to non-checkpointed training

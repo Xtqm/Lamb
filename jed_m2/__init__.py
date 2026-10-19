@@ -33,6 +33,21 @@ from jed_m2.mamba import MambaBlock
 from jed_m2.mla import MultiHeadLatentAttention, RMSNorm, RotaryEmbedding
 from jed_m2.model import JEDM2Block, JEDM2Model, JEDM2Output
 from jed_m2.moe import GELUFeedForward, SparseTop2MoE, SwiGLUFeedForward
+from jed_m2.rl import (
+    DPOConfig,
+    DPOTrainer,
+    GRPOConfig,
+    GRPOTrainer,
+    calculate_dpo_loss,
+    calculate_grpo_loss,
+    compute_token_log_probs,
+)
+from jed_m2.trainer import (
+    JEDM2Trainer,
+    JEDM2TrainerConfig,
+    build_cosine_scheduler,
+    build_optimizer,
+)
 
 __all__ = [
     "JEDM2Config",
@@ -67,4 +82,15 @@ __all__ = [
     "TrajectoryCollator",
     "JEDM2LossConfig",
     "JEDM2CompositeLoss",
+    "JEDM2TrainerConfig",
+    "JEDM2Trainer",
+    "build_optimizer",
+    "build_cosine_scheduler",
+    "DPOConfig",
+    "GRPOConfig",
+    "DPOTrainer",
+    "GRPOTrainer",
+    "calculate_dpo_loss",
+    "calculate_grpo_loss",
+    "compute_token_log_probs",
 ]

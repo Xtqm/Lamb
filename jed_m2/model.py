@@ -205,10 +205,20 @@ class JEDM2Model(nn.Module):
         # 6. Latent World Model (JEPA)
         self.jepa = JEPAWorldModel(self.config)
 
+        self.gradient_checkpointing: bool = False
+
         # Optional weight tying between token embedding, LM head, and argument head
         if tie_weights:
             self.lm_head.weight = self.tok_embeddings.weight
             self.action_head.argument_head.proj.weight = self.tok_embeddings.weight
+
+    def gradient_checkpointing_enable(self) -> None:
+        """Enables selective gradient checkpointing across recurrent blocks during training."""
+        self.gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self) -> None:
+        """Disables gradient checkpointing."""
+        self.gradient_checkpointing = False
 
     def forward(
         self,
@@ -245,7 +255,16 @@ class JEDM2Model(nn.Module):
         # Propagate through stacked JEDM2Block layers and accumulate MoE aux loss
         total_aux_loss = torch.zeros((), device=x.device, dtype=x.dtype)
         for block in self.blocks:
-            x, aux_loss = block(x, attention_mask=attention_mask)
+            if self.gradient_checkpointing and self.training:
+                # Selective gradient checkpointing across JEDM2Block layers to constrain activation memory
+                x, aux_loss = torch.utils.checkpoint.checkpoint(
+                    block,
+                    x,
+                    attention_mask,
+                    use_reentrant=False,
+                )
+            else:
+                x, aux_loss = block(x, attention_mask=attention_mask)
             total_aux_loss = total_aux_loss + aux_loss
 
         # Normalize final hidden states: [B, S, hidden_dim]
