@@ -3,10 +3,25 @@ JED-M2: Native Large Action Model (LAM) Architecture in PyTorch.
 """
 
 from jed_m2.config import JEDM2Config
-from jed_m2.mla import MultiHeadLatentAttention, RotaryEmbedding, RMSNorm
-from jed_m2.moe import SparseTop2MoE, SwiGLUFeedForward, GELUFeedForward
+from jed_m2.heads import (
+    ActionGate,
+    ActionOutput,
+    ActionType,
+    ActionTypeHead,
+    ArgumentHead,
+    CoordinateHead,
+    NativeActionHead,
+)
+from jed_m2.jepa import (
+    EMATargetEncoder,
+    JEPAWorldModel,
+    LatentPredictor,
+    LatentStateEncoder,
+)
 from jed_m2.mamba import MambaBlock
-from jed_m2.jepa import LatentStateEncoder, EMATargetEncoder, LatentPredictor, JEPAWorldModel
+from jed_m2.mla import MultiHeadLatentAttention, RMSNorm, RotaryEmbedding
+from jed_m2.model import JEDM2Block, JEDM2Model, JEDM2Output
+from jed_m2.moe import GELUFeedForward, SparseTop2MoE, SwiGLUFeedForward
 
 __all__ = [
     "JEDM2Config",
@@ -21,5 +36,14 @@ __all__ = [
     "EMATargetEncoder",
     "LatentPredictor",
     "JEPAWorldModel",
+    "ActionGate",
+    "ActionTypeHead",
+    "CoordinateHead",
+    "ArgumentHead",
+    "NativeActionHead",
+    "ActionType",
+    "ActionOutput",
+    "JEDM2Block",
+    "JEDM2Model",
+    "JEDM2Output",
 ]
-

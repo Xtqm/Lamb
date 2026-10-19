@@ -68,17 +68,17 @@ Lamb/
 ├── PROJECT_CONTEXT.md          # Core architecture, specs & progress tracker
 ├── verify_phase1.py            # Phase 1 standalone hardware & tensor test (MLA + MoE)
 ├── verify_phase2.py            # Phase 2 SSM + JEPA verification test
-├── verify_phase3.py            # Phase 3 Action heads & backbone rollout test (Pending)
+├── verify_phase3.py            # Phase 3 Action heads & backbone rollout test
 ├── openspec/                   # Spec-driven development framework & archived changes
 └── jed_m2/
     ├── __init__.py             # Exports public modules
     ├── config.py               # Global JEDM2Config dataclass
-    ├── mla.py                  # Multi-Head Latent Attention + RoPE + RMSNorm
+    ├── mla.py                  # Multi-Head Latent Attention + RoPE + RMSNorm (Sequence + Step)
     ├── moe.py                  # Sparse Top-2 MoE with SwiGLU & Aux Loss
     ├── mamba.py                # Pure PyTorch Mamba SSM block (Parallel + O(1) Step)
     ├── jepa.py                 # Latent State Encoder, EMA Target, and Latent Predictor
-    ├── heads.py                # Action Gate, Discrete Classifier & Coordinate Regressor (Pending)
-    └── model.py                # Full JED-M2 Unified Transformer-SSM Model (3x Blocks) (Pending)
+    ├── heads.py                # Dual-System Action Gate, Primitive Classifier, Coords & Arg Head
+    └── model.py                # Full JED-M2 Unified Transformer-SSM Model (3x Stacked Blocks)
 ```
 
 ---
@@ -99,15 +99,22 @@ Lamb/
 - [x] Phase 2 footprint: ~3.31M parameters; Cumulative architecture (Phases 1-2): ~16.20M parameters.
 - [x] Verification Output: Passes forward, recurrent step equivalence, backward gradient checks (zero NaNs/Infs), and target network gradient isolation on `cuda:0` in `bfloat16` at 922.45 MB peak VRAM.
 
-### [PENDING] Phase 3: Action Heads & Backbone Integration
-- [ ] Implement `heads.py`:
-  - `ActionGate`: `nn.Linear(hidden_dim, 1)` to predict action emission vs rationale continuation.
-  - `ActionTypeHead`: MLP (`hidden_dim -> hidden_dim // 2 -> GELU -> Dropout -> num_action_types`).
-  - `CoordinateHead`: Spatial pointer MLP (`hidden_dim -> hidden_dim // 4 -> GELU -> 2 -> Sigmoid`) for normalized $[0, 1]$ screen coordinates.
-- [ ] Implement unified `JEDM2Model` in `model.py`:
-  - Stacks **3 core recurrent blocks** (each containing Mamba SSM + MLA + Sparse MoE).
-  - Integrates observation input embeddings, `JEPAWorldModel`, and dual-system action heads.
-- [ ] Implement `verify_phase3.py` profiling multi-step rollout memory and gradient backprop.
+### [DONE] Phase 3: Action Heads & Backbone Integration
+- [x] Implement `heads.py` featuring dual-system action decoding:
+  - `ActionGate`: `nn.Linear(hidden_dim, 1)` predicting action emission vs latent reasoning.
+  - `ActionTypeHead`: MLP (`hidden_dim -> hidden_dim // 2 -> GELU -> Dropout -> num_action_types`) covering 6 primitives (CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH).
+  - `CoordinateHead`: Spatial pointer regressor (`hidden_dim -> hidden_dim // 4 -> GELU -> 2 -> Sigmoid`) for normalized $[0, 1]$ screen coordinates.
+  - `ArgumentHead`: Linear projection (`hidden_dim -> vocab_size`) for tokenized arguments.
+  - `NativeActionHead`: Composite module coordinating all four heads with inference decoding `predict_action(...)`.
+- [x] Implement unified `JEDM2Model` in `model.py`:
+  - `JEDM2Block`: Composite recurrent block interleaving RMSNorm -> MambaBlock -> RMSNorm -> MLA -> RMSNorm -> SparseTop2MoE with residual connections.
+  - `JEDM2Model`: Full LAM backbone stacking 3 `JEDM2Block` layers (~44.96M params) over observation embeddings and `JEPAWorldModel`, feeding `NativeActionHead` and autoregressive LM reasoning head. Total parameters: ~50.97M total / ~22.26M active per token.
+  - Autoregressive recurrent rollout `step(...)` method preserving layer-wise Mamba SSM buffers, conv buffers, and MLA KV-cache across all 3 layers.
+- [x] Implement `verify_phase3.py` profiling multi-step rollout, dual action outputs, gradient backpropagation, parameter budget, and memory:
+  - Passes forward pass, dual action output shapes, and bounded coordinates.
+  - Passes 16-step recurrent rollout with state buffer integrity.
+  - Passes backward pass asserting zero NaNs/Infs and JEPA EMA target network gradient isolation.
+  - Peak GPU VRAM allocated: **1159.73 MB** (< 2048.00 MB / 2.0 GB target limit) on CUDA in `bfloat16` on NVIDIA GeForce RTX 5060 Laptop GPU.
 
 ### [PENDING] Phase 4: Trajectory Dataset & Loss Harness
 - [ ] Synthetic trajectory generation pipeline (DOM tree / GUI states, discrete tools, target coordinates).

@@ -60,17 +60,28 @@ class RotaryEmbedding(nn.Module):
         x2 = x[..., self.dim // 2 :]
         return torch.cat((-x2, x1), dim=-1)
 
-    def forward(self, x: torch.Tensor, seq_len: int) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, seq_len: int, start_pos: int = 0) -> torch.Tensor:
         """
         Apply RoPE to input tensor x.
         x shape: [batch_size, seq_len, num_heads or 1, dim]
         """
-        if seq_len > self.cos_cached.shape[0]:
-            self._build_cache(seq_len)
+        end_pos = start_pos + seq_len
+        if end_pos > self.cos_cached.shape[0]:
+            self._build_cache(end_pos)
 
         # cos, sin: [1, seq_len, 1, dim]
-        cos = self.cos_cached[:seq_len].to(dtype=x.dtype, device=x.device).unsqueeze(0).unsqueeze(2)
-        sin = self.sin_cached[:seq_len].to(dtype=x.dtype, device=x.device).unsqueeze(0).unsqueeze(2)
+        cos = (
+            self.cos_cached[start_pos:end_pos]
+            .to(dtype=x.dtype, device=x.device)
+            .unsqueeze(0)
+            .unsqueeze(2)
+        )
+        sin = (
+            self.sin_cached[start_pos:end_pos]
+            .to(dtype=x.dtype, device=x.device)
+            .unsqueeze(0)
+            .unsqueeze(2)
+        )
 
         # Standard RoPE application
         return (x * cos) + (self._rotate_half(x) * sin)
@@ -228,3 +239,88 @@ class MultiHeadLatentAttention(nn.Module):
         # out: [B, S, hidden_dim] = [B, S, 512]
         out = self.w_o(attn_out)
         return out
+
+    def step(
+        self,
+        x_t: torch.Tensor,
+        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        pos: int = 0,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Recurrent single-token step for Multi-Head Latent Attention with dynamic KV caching.
+
+        Args:
+            x_t: Input tensor for current timestep, shape [B, D] or [B, 1, D].
+            kv_cache: Optional tuple of (cached_k, cached_v), each of shape
+                      [B, num_heads, past_len, head_dim].
+            pos: Current sequence position integer (0-indexed).
+
+        Returns:
+            Tuple of:
+            - out_t: Output tensor for current timestep, shape matches x_t [B, D] or [B, 1, D].
+            - next_kv_cache: Updated (k, v) cache tuple.
+        """
+        squeeze_needed = False
+        if x_t.ndim == 2:
+            x_t = x_t.unsqueeze(1)  # [B, 1, D]
+            squeeze_needed = True
+
+        b_sz, seq_len, _ = x_t.shape
+
+        # 1. Query projection & compression
+        c_q = self.w_dq(x_t)
+        c_q = self.q_norm(c_q)
+
+        q_nope = self.w_uq(c_q).view(b_sz, seq_len, self.num_heads, self.qk_nope_head_dim)
+        q_rope = self.w_qr(c_q).view(b_sz, seq_len, self.num_heads, self.qk_rope_head_dim)
+        q_rope = self.rotary_emb(q_rope, seq_len=1, start_pos=pos)
+        q = torch.cat([q_nope, q_rope], dim=-1)  # [B, 1, num_heads, qk_head_dim]
+
+        # 2. Key-Value projection & compression
+        c_kv = self.w_dkv(x_t)
+        c_kv = self.kv_norm(c_kv)
+
+        k_nope = self.w_uk(c_kv).view(b_sz, seq_len, self.num_heads, self.qk_nope_head_dim)
+        k_rope = self.w_kr(x_t).view(b_sz, seq_len, 1, self.qk_rope_head_dim)
+        k_rope = self.rotary_emb(k_rope, seq_len=1, start_pos=pos)
+        k_rope = k_rope.expand(-1, -1, self.num_heads, -1)
+        k_t = torch.cat([k_nope, k_rope], dim=-1)  # [B, 1, num_heads, qk_head_dim]
+
+        v_t = self.w_uv(c_kv).view(
+            b_sz, seq_len, self.num_heads, self.v_head_dim
+        )  # [B, 1, num_heads, v_head_dim]
+
+        # Transpose to [B, num_heads, 1, head_dim]
+        q_t = q.transpose(1, 2)
+        k_t = k_t.transpose(1, 2)
+        v_t = v_t.transpose(1, 2)
+
+        # 3. Update KV-cache
+        if kv_cache is None:
+            k_all = k_t
+            v_all = v_t
+        else:
+            k_prev, v_prev = kv_cache
+            k_all = torch.cat([k_prev, k_t], dim=2)
+            v_all = torch.cat([v_prev, v_t], dim=2)
+
+        next_kv_cache = (k_all, v_all)
+
+        # 4. Attention (attending over all keys in cache up to pos)
+        attn_out = F.scaled_dot_product_attention(
+            q_t,
+            k_all,
+            v_all,
+            is_causal=False,
+        )
+        # attn_out: [B, num_heads, 1, v_head_dim] -> [B, 1, num_heads, v_head_dim]
+        attn_out = attn_out.transpose(1, 2).contiguous()
+        attn_out = attn_out.view(b_sz, seq_len, self.num_heads * self.v_head_dim)
+
+        # 5. Output projection
+        out_t = self.w_o(attn_out)
+
+        if squeeze_needed:
+            out_t = out_t.squeeze(1)
+
+        return out_t, next_kv_cache

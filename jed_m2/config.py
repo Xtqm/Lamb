@@ -44,6 +44,14 @@ class JEDM2Config:
     jepa_loss_cos_weight: float = 0.5  # Weight of cosine distance in composite loss
     jepa_action_dim: int = 64  # Action embedding dimension for predictor conditioning
 
+    # Backbone Stack parameters
+    num_layers: int = 3  # Stacked JEDM2Block recurrent layers
+
+    # Dual-System Action Head parameters
+    num_action_types: int = 6  # CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH
+    action_dropout: float = 0.1
+    action_gate_threshold: float = 0.5
+
     @property
     def qk_head_dim(self) -> int:
         """Combined query/key head dimension: d_h^{NOPE} + d_h^R."""
