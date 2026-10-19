@@ -47,3 +47,8 @@ ENV/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Temporary planning and scratch docs
+FUTURE_PHASES_PROPOSALS.md
+*.tmp.md
+
