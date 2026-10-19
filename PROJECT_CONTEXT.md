@@ -69,6 +69,7 @@ Lamb/
 ├── verify_phase1.py            # Phase 1 standalone hardware & tensor test (MLA + MoE)
 ├── verify_phase2.py            # Phase 2 SSM + JEPA verification test
 ├── verify_phase3.py            # Phase 3 Action heads & backbone rollout test
+├── verify_phase4.py            # Phase 4 Dataset collation & composite loss test
 ├── openspec/                   # Spec-driven development framework & archived changes
 └── jed_m2/
     ├── __init__.py             # Exports public modules
@@ -78,7 +79,9 @@ Lamb/
     ├── mamba.py                # Pure PyTorch Mamba SSM block (Parallel + O(1) Step)
     ├── jepa.py                 # Latent State Encoder, EMA Target, and Latent Predictor
     ├── heads.py                # Dual-System Action Gate, Primitive Classifier, Coords & Arg Head
-    └── model.py                # Full JED-M2 Unified Transformer-SSM Model (3x Stacked Blocks)
+    ├── model.py                # Full JED-M2 Unified Transformer-SSM Model (3x Stacked Blocks)
+    ├── dataset.py              # WebArena/Mind2Web synthetic trajectory generator & collator
+    └── losses.py               # Calibrated multi-task composite loss harness
 ```
 
 ---
@@ -116,10 +119,31 @@ Lamb/
   - Passes backward pass asserting zero NaNs/Infs and JEPA EMA target network gradient isolation.
   - Peak GPU VRAM allocated: **1159.73 MB** (< 2048.00 MB / 2.0 GB target limit) on CUDA in `bfloat16` on NVIDIA GeForce RTX 5060 Laptop GPU.
 
-### [PENDING] Phase 4: Trajectory Dataset & Loss Harness
-- [ ] Synthetic trajectory generation pipeline (DOM tree / GUI states, discrete tools, target coordinates).
-- [ ] Trajectory formatting inspired by WebArena / Mind2Web interaction traces.
-- [ ] Composite loss harness combining $\mathcal{L}_{\text{reason}}$, $\mathcal{L}_{\text{type}}$, $\mathcal{L}_{\text{coord}}$, $\mathcal{L}_{\text{jepa}}$, and $\mathcal{L}_{\text{aux}}$.
+### [DONE] Phase 4: Trajectory Dataset & Loss Harness
+- [x] Synthetic multi-turn agent trajectory generator (`jed_m2/dataset.py`):
+  - Trajectory tuples $\tau = (s_0, a_0, r_0, s_1, a_1, \dots, s_T)$ modeled after WebArena and Mind2Web.
+  - Realistic DOM element trees, UI bounding boxes $[x_{\min}, y_{\min}, x_{\max}, y_{\max}] \in [0, 1]$, and continuous pointer targets $(x, y) \in [0, 1]$.
+  - Discrete action primitives (CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH), string payload arguments, and System 2 reasoning thoughts.
+  - Streaming PyTorch Dataset (`AgentTrajectoryDataset`) yielding trajectories on-demand without memory bottlenecks.
+  - Dynamic batch collator (`TrajectoryCollator`) constructing 4D causal & padding attention masks, action token index mapping, component loss masks, and aligned JEPA state transition pairs.
+- [x] Unified Composite Multi-Task Loss Harness (`jed_m2/losses.py`):
+  - Reasoning loss ($\mathcal{L}_{\text{reason}}$): Autoregressive cross-entropy on thought tokens.
+  - Action gate loss ($\mathcal{L}_{\text{gate}}$): Binary cross-entropy on action emission vs continued reasoning.
+  - Action primitive loss ($\mathcal{L}_{\text{type}}$): Multi-class cross-entropy on discrete tool categories.
+  - Coordinate regression loss ($\mathcal{L}_{\text{coord}}$): Smooth L1 / Huber loss on predicted $(x, y) \in [0, 1]$ screen coordinates.
+  - Argument payload loss ($\mathcal{L}_{\text{arg}}$): Masked autoregressive cross-entropy on argument tokens.
+  - JEPA latent loss ($\mathcal{L}_{\text{jepa}}$): Smooth L1 + cosine distance representation consistency.
+  - MoE load-balancing loss ($\mathcal{L}_{\text{aux}}$): Auxiliary routing penalty from SparseTop2MoE.
+  - Detailed logging metric dictionary reporting detached floats for all loss components, primitive accuracy, and coordinate MAE.
+- [x] Public API exposure in `jed_m2/__init__.py`.
+- [x] Implement and execute `verify_phase4.py`:
+  - Passes synthetic trajectory generation and DOM structure assertions.
+  - Passes dynamic batch collation and 4D causal lower-triangular mask checks.
+  - Passes full model forward pass and composite multi-task loss evaluation.
+  - Passes full backward pass asserting zero NaNs/Infs across all 161 active trainable parameters.
+  - Passes JEPA EMA target network gradient isolation check (`grad is None`).
+  - Passes zero-mask guardrails robustness check on sparse batches.
+  - Peak GPU VRAM allocated: **797.33 MB** (< 2048.00 MB / 2.0 GB target limit) on CUDA in `bfloat16` on NVIDIA GeForce RTX 5060 Laptop GPU.
 
 ### [PENDING] Phase 5: Training Loop & VRAM Optimization
 - [ ] Implement 8-bit AdamW / fused optimizer training loop with gradient accumulation.
