@@ -235,9 +235,11 @@ def main():
             continue
 
         if param.requires_grad:
-            # jepa.predictor contains two mutually exclusive action pathways:
-            # action_embed (for discrete IDs) vs action_proj (for continuous vectors).
-            if "jepa.predictor.action_proj" in name or "jepa.predictor.action_embed" in name:
+            # Optional pathways inactive for text-only inputs:
+            # - jepa.predictor action_embed vs action_proj
+            # - vision_encoder and coordinate_head visual grounding (Phase 6D)
+            # - jepa multimodal visual encoder pathway (Phase 6D)
+            if any(k in name for k in ("action_proj", "action_embed", "vision_encoder", "cross_attn", "norm_visual", "norm_query", "norm_grounded", "fc_vis", "norm_vis")):
                 if param.grad is not None:
                     assert not torch.isnan(param.grad).any(), f"NaN in gradient of parameter: {name}"
                     assert not torch.isinf(param.grad).any(), f"Inf in gradient of parameter: {name}"

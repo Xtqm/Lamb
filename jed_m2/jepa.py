@@ -19,7 +19,8 @@ from jed_m2.mla import RMSNorm
 class LatentStateEncoder(nn.Module):
     """
     Online Latent State Encoder for JED-M2 JEPA.
-    Maps high-dimensional observation features to an abstract, normalized latent space z_t.
+    Maps high-dimensional observation features (and optional visual patch tokens)
+    to an abstract, normalized latent space z_t.
     """
 
     def __init__(self, config: JEDM2Config, obs_dim: Optional[int] = None):
@@ -29,12 +30,16 @@ class LatentStateEncoder(nn.Module):
         self.latent_dim: int = config.jepa_latent_dim
         intermediate_dim: int = config.hidden_dim
 
-        # Input normalization: [..., obs_dim]
+        # Input normalization for dense observation: [..., obs_dim]
         self.norm_in = RMSNorm(self.obs_dim, eps=config.layer_norm_eps)
 
-        # Non-linear projection: [..., obs_dim] -> [..., intermediate_dim]
+        # Dense observation projection: [..., obs_dim] -> [..., intermediate_dim]
         self.fc1 = nn.Linear(self.obs_dim, intermediate_dim, bias=False)
         self.act = nn.SiLU()
+
+        # Multimodal visual patch projection & normalization
+        self.norm_vis = RMSNorm(self.obs_dim, eps=config.layer_norm_eps)
+        self.fc_vis = nn.Linear(self.obs_dim, intermediate_dim, bias=False)
 
         # Latent projection: [..., intermediate_dim] -> [..., latent_dim]
         self.fc2 = nn.Linear(intermediate_dim, self.latent_dim, bias=False)
@@ -42,20 +47,39 @@ class LatentStateEncoder(nn.Module):
         # Output latent normalization: [..., latent_dim]
         self.norm_out = RMSNorm(self.latent_dim, eps=config.layer_norm_eps)
 
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        obs: torch.Tensor,
+        visual_tokens: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        Encode raw observation features into abstract latent representation.
+        Encode observation features into abstract latent representation.
 
         Args:
             obs: Observation tensor of shape [B, D_obs] or [B, L, D_obs].
+            visual_tokens: Optional visual patch tokens [B, N_v, hidden_dim].
 
         Returns:
             Latent state tensor of shape [B, D_latent] or [B, L, D_latent].
         """
         # [B, ..., D_obs] -> [B, ..., D_obs]
-        h = self.norm_in(obs)
+        h_obs = self.norm_in(obs)
         # [B, ..., D_obs] -> [B, ..., intermediate_dim]
-        h = self.act(self.fc1(h))
+        h = self.fc1(h_obs)
+
+        # Multimodal fusion if visual tokens provided
+        if visual_tokens is not None:
+            # Pool visual tokens spatially across patches: [B, N_v, D] -> [B, D]
+            if visual_tokens.ndim == 3:
+                vis_pooled = visual_tokens.mean(dim=1)
+            else:
+                vis_pooled = visual_tokens
+            h_vis = self.fc_vis(self.norm_vis(vis_pooled))
+            if h.ndim == 3 and h_vis.ndim == 2:
+                h_vis = h_vis.unsqueeze(1)
+            h = h + h_vis
+
+        h = self.act(h)
         # [B, ..., intermediate_dim] -> [B, ..., latent_dim]
         z = self.fc2(h)
         # [B, ..., latent_dim] -> [B, ..., latent_dim]
@@ -80,18 +104,23 @@ class EMATargetEncoder(nn.Module):
             param.requires_grad = False
 
     @torch.no_grad()
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        obs: torch.Tensor,
+        visual_tokens: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Encode target observation with stop-gradient.
 
         Args:
             obs: Target observation tensor of shape [B, D_obs] or [B, L, D_obs].
+            visual_tokens: Optional target visual patch tokens [B, N_v, hidden_dim].
 
         Returns:
             Detached target latent representation z_{t+1}.
         """
         self.encoder.eval()
-        z_target = self.encoder(obs)
+        z_target = self.encoder(obs, visual_tokens=visual_tokens)
         return z_target.detach()
 
     @torch.no_grad()
@@ -203,13 +232,21 @@ class JEPAWorldModel(nn.Module):
         # 3. Action-conditioned transition predictor
         self.predictor = LatentPredictor(config)
 
-    def encode(self, obs: torch.Tensor) -> torch.Tensor:
+    def encode(
+        self,
+        obs: torch.Tensor,
+        visual_tokens: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Encodes observation using the online encoder."""
-        return self.encoder(obs)
+        return self.encoder(obs, visual_tokens=visual_tokens)
 
-    def encode_target(self, obs_next: torch.Tensor) -> torch.Tensor:
+    def encode_target(
+        self,
+        obs_next: torch.Tensor,
+        visual_tokens_next: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Encodes target observation using the detached EMA target encoder."""
-        return self.target_encoder(obs_next)
+        return self.target_encoder(obs_next, visual_tokens=visual_tokens_next)
 
     def predict(self, z_t: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Predicts expected next latent state given current state and action."""
@@ -254,6 +291,8 @@ class JEPAWorldModel(nn.Module):
         obs_t: torch.Tensor,
         action_t: torch.Tensor,
         obs_next: torch.Tensor,
+        visual_tokens_t: Optional[torch.Tensor] = None,
+        visual_tokens_next: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Full forward pass for self-supervised JEPA transition modeling.
@@ -262,6 +301,8 @@ class JEPAWorldModel(nn.Module):
             obs_t: Current observation tensor [B, D_obs].
             action_t: Executed action tensor [B, D_action] or discrete IDs [B].
             obs_next: Next observed state tensor [B, D_obs].
+            visual_tokens_t: Optional current visual patch tokens [B, N_v, hidden_dim].
+            visual_tokens_next: Optional next visual patch tokens [B, N_v, hidden_dim].
 
         Returns:
             Tuple of:
@@ -271,13 +312,13 @@ class JEPAWorldModel(nn.Module):
             - metrics: Detailed loss metrics dictionary.
         """
         # 1. Online encode current observation: [B, D_latent]
-        z_t = self.encode(obs_t)
+        z_t = self.encode(obs_t, visual_tokens=visual_tokens_t)
 
         # 2. Predict next latent state: [B, D_latent]
         z_pred = self.predict(z_t, action_t)
 
         # 3. Target encode next observation with detached gradients: [B, D_latent]
-        z_target = self.encode_target(obs_next)
+        z_target = self.encode_target(obs_next, visual_tokens_next=visual_tokens_next)
 
         # 4. Compute composite consistency loss
         loss, metrics = self.compute_loss(z_pred, z_target)

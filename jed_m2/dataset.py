@@ -63,6 +63,7 @@ class InteractionTurn:
     coordinates: Tuple[float, float]  # Continuous pointer target (x, y) in [0, 1]
     argument: str  # String payload (typed text, target URL, API query)
     reward: float = 0.0  # Environment reward signal
+    screenshot: Optional[torch.Tensor] = None  # Synthetic RGB screenshot image [3, H, W]
 
 
 @dataclass
@@ -241,6 +242,69 @@ class SyntheticTrajectoryGenerator:
         self.rng.shuffle(elements)
         return elements, target_el
 
+    def _render_screenshot(
+        self,
+        elements: List[UIElement],
+        target_el: UIElement,
+        h: int = 224,
+        w: int = 224,
+    ) -> torch.Tensor:
+        """
+        Renders a synthetic pure-PyTorch screenshot image [3, H, W] representing the GUI canvas.
+        Draws background and UI element bounding box rectangular patches.
+        """
+        # Background: light gray [0.92, 0.94, 0.96]
+        img = torch.full((3, h, w), 0.94, dtype=torch.float32)
+        img[0] = 0.92
+        img[1] = 0.94
+        img[2] = 0.96
+
+        # Draw distractor UI elements
+        for el in elements:
+            x0 = max(0, min(w - 1, int(el.bbox[0] * w)))
+            y0 = max(0, min(h - 1, int(el.bbox[1] * h)))
+            x1 = max(0, min(w, int(el.bbox[2] * w)))
+            y1 = max(0, min(h, int(el.bbox[3] * h)))
+            if x1 <= x0 or y1 <= y0:
+                continue
+
+            tag_hash = int(hashlib.md5(f"{el.tag}_{el.role}".encode()).hexdigest()[:6], 16)
+            r = ((tag_hash >> 16) & 0xFF) / 255.0 * 0.4 + 0.5  # pastel range 0.5-0.9
+            g = ((tag_hash >> 8) & 0xFF) / 255.0 * 0.4 + 0.5
+            b = (tag_hash & 0xFF) / 255.0 * 0.4 + 0.5
+
+            img[0, y0:y1, x0:x1] = r
+            img[1, y0:y1, x0:x1] = g
+            img[2, y0:y1, x0:x1] = b
+
+            # Darker border
+            border_r, border_g, border_b = r * 0.7, g * 0.7, b * 0.7
+            img[0, y0, x0:x1] = border_r
+            img[1, y0, x0:x1] = border_g
+            img[2, y0, x0:x1] = border_b
+            img[0, y1 - 1, x0:x1] = border_r
+            img[1, y1 - 1, x0:x1] = border_g
+            img[2, y1 - 1, x0:x1] = border_b
+            img[0, y0:y1, x0] = border_r
+            img[1, y0:y1, x0] = border_g
+            img[2, y0:y1, x0] = border_b
+            img[0, y0:y1, x1 - 1] = border_r
+            img[1, y0:y1, x1 - 1] = border_g
+            img[2, y0:y1, x1 - 1] = border_b
+
+        # Draw target element with prominent accent color
+        tx0 = max(0, min(w - 1, int(target_el.bbox[0] * w)))
+        ty0 = max(0, min(h - 1, int(target_el.bbox[1] * h)))
+        tx1 = max(0, min(w, int(target_el.bbox[2] * w)))
+        ty1 = max(0, min(h, int(target_el.bbox[3] * h)))
+        if tx1 > tx0 and ty1 > ty0:
+            # Vibrant accent color: [0.15, 0.45, 0.85]
+            img[0, ty0:ty1, tx0:tx1] = 0.15
+            img[1, ty0:ty1, tx0:tx1] = 0.45
+            img[2, ty0:ty1, tx0:tx1] = 0.85
+
+        return img
+
     def generate_trajectory(self, scenario_idx: Optional[int] = None, max_turns: Optional[int] = None) -> TrajectorySample:
         """
         Synthesizes a full multi-turn trajectory sample tau = (s_0, a_0, r_0, ..., s_T).
@@ -283,6 +347,10 @@ class SyntheticTrajectoryGenerator:
             # Thought rationale
             thought = f"Step {turn_idx}: {thought_tmpl}. Target element: {el_name}."
 
+            # Synthetic screenshot image [3, H, W] for visual grounding
+            img_size = getattr(self.config, "image_size", 224)
+            screenshot = self._render_screenshot(dom_elements, target_el, h=img_size, w=img_size)
+
             turns.append(
                 InteractionTurn(
                     turn_id=turn_idx,
@@ -294,6 +362,7 @@ class SyntheticTrajectoryGenerator:
                     coordinates=coords,
                     argument=arg_val,
                     reward=1.0 if turn_idx == len(steps) - 1 else 0.0,
+                    screenshot=screenshot,
                 )
             )
 
@@ -374,9 +443,15 @@ class TrajectoryBatch:
     jepa_obs_t: torch.Tensor  # [B, hidden_dim] JEPA observation at time t
     jepa_action_t: torch.Tensor  # [B] JEPA action discrete ID at time t
     jepa_obs_next: torch.Tensor  # [B, hidden_dim] JEPA target observation at time t+1
+    images: Optional[torch.Tensor] = None  # [B, 3, H, W] screenshot images for visual grounding
 
     def to(self, device: torch.device, dtype: Optional[torch.dtype] = None) -> "TrajectoryBatch":
         """Transfers all internal batch tensors to target device and precision."""
+        images_tensor = (
+            self.images.to(device=device, dtype=dtype or torch.float32)
+            if self.images is not None
+            else None
+        )
         return TrajectoryBatch(
             input_ids=self.input_ids.to(device=device),
             attention_mask=self.attention_mask.to(device=device),
@@ -392,6 +467,7 @@ class TrajectoryBatch:
             jepa_obs_t=self.jepa_obs_t.to(device=device, dtype=dtype or torch.float32),
             jepa_action_t=self.jepa_action_t.to(device=device),
             jepa_obs_next=self.jepa_obs_next.to(device=device, dtype=dtype or torch.float32),
+            images=images_tensor,
         )
 
 
@@ -436,6 +512,7 @@ class TrajectoryCollator:
         batch_jepa_obs_t: List[torch.Tensor] = []
         batch_jepa_act_t: List[int] = []
         batch_jepa_obs_next: List[torch.Tensor] = []
+        batch_images: List[torch.Tensor] = []
 
         for sample in samples:
             tokens: List[int] = [self.tokenizer.BOS_TOKEN_ID]
@@ -445,6 +522,13 @@ class TrajectoryCollator:
             action_types: List[int] = []
             coords: List[Tuple[float, float]] = []
             is_spatial: List[bool] = []
+
+            # Extract screenshot for visual grounding (turn 0)
+            if sample.turns and sample.turns[0].screenshot is not None:
+                batch_images.append(sample.turns[0].screenshot)
+            else:
+                img_sz = getattr(self.config, "image_size", 224)
+                batch_images.append(torch.zeros(3, img_sz, img_sz, dtype=torch.float32))
 
             # Process each turn in trajectory
             for turn_idx, turn in enumerate(sample.turns):
@@ -602,6 +686,9 @@ class TrajectoryCollator:
         jepa_action_t = torch.tensor(batch_jepa_act_t, dtype=torch.long)
         jepa_obs_next = torch.stack(batch_jepa_obs_next, dim=0)
 
+        # Stack screenshot images: [B, 3, H, W]
+        images_tensor = torch.stack(batch_images, dim=0) if batch_images else None
+
         return TrajectoryBatch(
             input_ids=padded_input_ids,
             attention_mask=attention_mask,
@@ -617,4 +704,5 @@ class TrajectoryCollator:
             jepa_obs_t=jepa_obs_t,
             jepa_action_t=jepa_action_t,
             jepa_obs_next=jepa_obs_next,
+            images=images_tensor,
         )

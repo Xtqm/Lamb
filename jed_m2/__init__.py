@@ -65,6 +65,10 @@ from jed_m2.trainer import (
     build_cosine_scheduler,
     build_optimizer,
 )
+from jed_m2.vision import (
+    VisionPatchEncoder,
+    get_2d_sincos_pos_embed,
+)
 
 __all__ = [
     "JEDM2Config",
@@ -89,6 +93,8 @@ __all__ = [
     "JEDM2Block",
     "JEDM2Model",
     "JEDM2Output",
+    "VisionPatchEncoder",
+    "get_2d_sincos_pos_embed",
     "UIElement",
     "InteractionTurn",
     "TrajectorySample",

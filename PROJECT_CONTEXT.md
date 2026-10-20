@@ -78,10 +78,12 @@ Lamb/
 ├── verify_phase6a.py           # Phase 6A Environment, runtime rollout & constant-memory test
 ├── verify_phase6b.py           # Phase 6B RL rollouts, DPO/GRPO training & memory ceiling test
 ├── verify_phase6c.py           # Phase 6C SFT convergence & baseline checkpoint verification test
+├── verify_phase6d.py           # Phase 6D Multimodal visual grounding & VRAM ceiling test
 ├── openspec/                   # Spec-driven development framework & archived changes
 └── jed_m2/
     ├── __init__.py             # Exports public modules
     ├── config.py               # Global JEDM2Config dataclass
+    ├── vision.py               # Phase 6D Lightweight pure PyTorch visual patch encoder
     ├── mla.py                  # Multi-Head Latent Attention + RoPE + RMSNorm (Sequence + Step)
     ├── moe.py                  # Sparse Top-2 MoE with SwiGLU & Aux Loss
     ├── mamba.py                # Pure PyTorch Mamba SSM block (Parallel + O(1) Step)
@@ -235,11 +237,19 @@ Lamb/
 - [x] Production baseline checkpoint curation: saved `checkpoints/jed_m2_sft_base.pt` (290.34 MB, 168 parameter tensors) with exact parameter reload parity.
 - [x] Implement and execute `verify_phase6c.py` verifying architecture footprint, held-out validation passes across all 6 heads, effective batch size 16 gradient stability, VRAM ceiling compliance (< 6.0 GB), and baseline checkpoint reload integrity.
 
-### [NEXT] Phase 6D: Visual Action Grounding (Multimodal Vision-LAM Extension)
-- [ ] Implement lightweight pure PyTorch visual patch encoder (`jed_m2/vision.py`) mapping RGB screenshot patches to visual embedding tokens.
-- [ ] Extend `JEPAWorldModel` (`jed_m2/jepa.py`) and `JEDM2Model` (`jed_m2/model.py`) to accept dual multimodal observations (DOM tokens + visual screenshot patches).
-- [ ] Cross-attention / early-fusion visual grounding for spatial coordinate regression.
-- [ ] Implement and run `verify_phase6d.py` verifying multimodal forward/backward pass and coordinate grounding on visual features within the 6.0 GB VRAM ceiling.
+### [DONE] Phase 6D: Visual Action Grounding (Multimodal Vision-LAM Extension)
+- [x] Pure PyTorch visual patch encoder (`jed_m2/vision.py`): ~0.49M parameters, 2D convolutional patch projection (224x224 -> 196 tokens, 448x448 -> 784 tokens) with 2D spatial sinusoidal positional embeddings and bicubic dynamic interpolation.
+- [x] Multimodal action heads with visual cross-attention grounding (`jed_m2/heads.py`): `CoordinateHead` cross-attends normalized query hidden states against visual patch tokens, regressing normalized $(x, y) \in [0, 1]$ screen coordinates with full backward compatibility for text-only inputs.
+- [x] Multimodal JEPA world model (`jed_m2/jepa.py`): online state encoder and detached EMA target encoder accept multimodal observation inputs (DOM features + pooled visual patch tokens) with Smooth L1 + cosine distance representation consistency loss.
+- [x] Unified multimodal Large Action Model (`jed_m2/model.py`): `JEDM2Model` ingests dual multimodal observations via early-fusion sequence concatenation (`[visual_tokens, text_tokens]`), applies bidirectional visual patch & causal text attention masking, slices text rationale representations for LM head, and grounds action head coordinates in visual patch features. Total parameters: ~53.04M total / ~24.07M active per token.
+- [x] Synthetic visual trajectory dataset (`jed_m2/dataset.py`): `SyntheticTrajectoryGenerator` renders synthetic $224 \times 224$ RGB screenshot canvases with UI element bounding box rectangular patches and distinct target colors. `TrajectoryCollator` dynamically collates and transfers batch screenshot tensors $[B, 3, H, W]$ in `TrajectoryBatch`.
+- [x] Implement and execute `verify_phase6d.py`:
+  - Verified visual patch encoder across resolutions (224x224 and 448x448).
+  - Verified text-only backward compatibility and multimodal early-fusion sequence forward pass.
+  - Verified visual cross-attention coordinate grounding sensitivity across contrasting visual scenes.
+  - Verified multimodal composite multi-task loss and end-to-end backpropagation with clean gradients (173 parameter tensors, zero NaNs/Infs) and strict JEPA target encoder gradient isolation (`grad is None`).
+  - Verified multimodal recurrent step rollout ($O(1)$ state buffer persistence).
+  - Peak GPU VRAM allocated: **1457.76 MB** (1.42 GB / 23.73% utilization), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit) on NVIDIA GeForce RTX 5060 Laptop GPU in `bfloat16`.
 
 ---
 

@@ -52,6 +52,17 @@ class JEDM2Config:
     action_dropout: float = 0.1
     action_gate_threshold: float = 0.5
 
+    # Vision Patch Encoder parameters (Phase 6D)
+    image_size: int = 224  # Standard screenshot input resolution (e.g. 224x224 or 448x448)
+    patch_size: int = 16  # Non-overlapping patch spatial dimension (16x16)
+    num_channels: int = 3  # RGB image channels
+    visual_grounding_heads: int = 4  # Number of attention heads for visual grounding in coordinate head
+
+    @property
+    def num_patches(self) -> int:
+        """Number of visual patches: (image_size // patch_size) ** 2."""
+        return (self.image_size // self.patch_size) ** 2
+
     @property
     def qk_head_dim(self) -> int:
         """Combined query/key head dimension: d_h^{NOPE} + d_h^R."""

@@ -23,6 +23,7 @@ from jed_m2.jepa import JEPAWorldModel
 from jed_m2.mamba import MambaBlock
 from jed_m2.mla import MultiHeadLatentAttention, RMSNorm
 from jed_m2.moe import SparseTop2MoE
+from jed_m2.vision import VisionPatchEncoder
 
 
 @dataclass
@@ -35,6 +36,7 @@ class JEDM2Output:
     aux_loss: torch.Tensor
     jepa_loss: Optional[torch.Tensor] = None
     jepa_metrics: Optional[Dict[str, torch.Tensor]] = None
+    visual_tokens: Optional[torch.Tensor] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert container to standard dictionary."""
@@ -45,6 +47,7 @@ class JEDM2Output:
             "aux_loss": self.aux_loss,
             "jepa_loss": self.jepa_loss,
             "jepa_metrics": self.jepa_metrics,
+            "visual_tokens": self.visual_tokens,
         }
 
     def __getitem__(self, item: str) -> Any:
@@ -205,6 +208,9 @@ class JEDM2Model(nn.Module):
         # 6. Latent World Model (JEPA)
         self.jepa = JEPAWorldModel(self.config)
 
+        # 7. Vision Patch Encoder (Phase 6D)
+        self.vision_encoder = VisionPatchEncoder(self.config)
+
         self.gradient_checkpointing: bool = False
 
         # Optional weight tying between token embedding, LM head, and argument head
@@ -225,32 +231,76 @@ class JEDM2Model(nn.Module):
         input_ids: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+        visual_tokens: Optional[torch.Tensor] = None,
         obs_t: Optional[torch.Tensor] = None,
         action_t: Optional[torch.Tensor] = None,
         obs_next: Optional[torch.Tensor] = None,
+        visual_tokens_t: Optional[torch.Tensor] = None,
+        visual_tokens_next: Optional[torch.Tensor] = None,
+        return_all_tokens: bool = False,
     ) -> JEDM2Output:
         """
         Sequence-parallel forward pass for training and verification.
+        Supports dual multimodal observations (DOM/text tokens + visual screenshot patches).
 
         Args:
             input_ids: Optional input token IDs of shape [batch_size, seq_len].
             inputs_embeds: Optional direct embeddings of shape [batch_size, seq_len, hidden_dim].
             attention_mask: Optional attention mask for MLA layers.
+            images: Optional screenshot image tensor [batch_size, 3, H, W].
+            visual_tokens: Optional pre-extracted visual patch tokens [batch_size, N_v, hidden_dim].
             obs_t: Optional JEPA observation state at time t [batch_size, hidden_dim].
             action_t: Optional JEPA action conditioning at time t [batch_size, action_dim].
             obs_next: Optional JEPA target observation state at time t+1 [batch_size, hidden_dim].
+            visual_tokens_t: Optional JEPA visual patch tokens at time t [batch_size, N_v, hidden_dim].
+            visual_tokens_next: Optional JEPA visual patch tokens at time t+1 [batch_size, N_v, hidden_dim].
+            return_all_tokens: If True, returns lm_logits/hidden_states over entire concatenated sequence.
 
         Returns:
             JEDM2Output container with LM logits, action predictions, hidden states,
-            MoE auxiliary loss, and optional JEPA loss.
+            MoE auxiliary loss, optional JEPA loss, and visual tokens.
         """
         if inputs_embeds is None:
             if input_ids is None:
                 raise ValueError("Must provide either input_ids or inputs_embeds.")
-            # [B, S] -> [B, S, hidden_dim]
-            x = self.tok_embeddings(input_ids)
+            # [B, S_t] -> [B, S_t, hidden_dim]
+            x_text = self.tok_embeddings(input_ids)
         else:
-            x = inputs_embeds
+            x_text = inputs_embeds
+
+        # 1. Process visual inputs if provided
+        if visual_tokens is None and images is not None:
+            # [B, 3, H, W] -> [B, N_v, hidden_dim]
+            visual_tokens = self.vision_encoder(images)
+
+        num_visual_tokens = 0
+        if visual_tokens is not None:
+            num_visual_tokens = visual_tokens.shape[1]
+            # Early fusion: prefix visual tokens before text/DOM tokens
+            # [B, N_v, D] + [B, S_t, D] -> [B, N_v + S_t, D]
+            x = torch.cat([visual_tokens, x_text], dim=1)
+
+            # Update or construct multimodal attention mask if mask provided
+            if attention_mask is not None:
+                B, S_total = x.shape[0], x.shape[1]
+                if attention_mask.ndim == 4 and attention_mask.shape[-1] != S_total:
+                    # Input mask was defined for text tokens: [B, 1, S_t, S_t]
+                    N_v = num_visual_tokens
+                    full_mask = torch.ones(
+                        (B, 1, S_total, S_total),
+                        dtype=torch.bool,
+                        device=x.device,
+                    )
+                    # Visual tokens do not attend to subsequent text tokens
+                    full_mask[:, :, :N_v, N_v:] = False
+                    # Text tokens attend to text tokens via provided mask
+                    full_mask[:, :, N_v:, N_v:] = attention_mask
+                    # Text tokens attend to visual tokens (already True)
+                    # Visual tokens attend to visual tokens (already True)
+                    attention_mask = full_mask
+        else:
+            x = x_text
 
         # Propagate through stacked JEDM2Block layers and accumulate MoE aux loss
         total_aux_loss = torch.zeros((), device=x.device, dtype=x.dtype)
@@ -267,27 +317,42 @@ class JEDM2Model(nn.Module):
                 x, aux_loss = block(x, attention_mask=attention_mask)
             total_aux_loss = total_aux_loss + aux_loss
 
-        # Normalize final hidden states: [B, S, hidden_dim]
+        # Normalize final hidden states: [B, S_total, hidden_dim]
         h_f = self.norm_f(x)
 
-        # System 2: Autoregressive LM rationale logits: [B, S, vocab_size]
-        lm_logits = self.lm_head(h_f)
+        # Slice text hidden states if visual tokens were prepended
+        if num_visual_tokens > 0 and not return_all_tokens:
+            h_text = h_f[:, num_visual_tokens:, :]
+        else:
+            h_text = h_f
 
-        # System 1: Dual-system action heads
-        action_output = self.action_head(h_f)
+        # System 2: Autoregressive LM rationale logits: [B, S_t, vocab_size]
+        lm_logits = self.lm_head(h_text)
+
+        # System 1: Dual-system action heads with visual grounding
+        action_output = self.action_head(h_text, visual_tokens=visual_tokens)
 
         # JEPA World Model evaluation (if trajectory transition inputs provided)
         jepa_loss, jepa_metrics = None, None
         if obs_t is not None and action_t is not None and obs_next is not None:
-            _, _, jepa_loss, jepa_metrics = self.jepa(obs_t, action_t, obs_next)
+            vt_t = visual_tokens_t if visual_tokens_t is not None else visual_tokens
+            vt_next = visual_tokens_next
+            _, _, jepa_loss, jepa_metrics = self.jepa(
+                obs_t,
+                action_t,
+                obs_next,
+                visual_tokens_t=vt_t,
+                visual_tokens_next=vt_next,
+            )
 
         return JEDM2Output(
             lm_logits=lm_logits,
             action_output=action_output,
-            hidden_states=h_f,
+            hidden_states=h_text,
             aux_loss=total_aux_loss,
             jepa_loss=jepa_loss,
             jepa_metrics=jepa_metrics,
+            visual_tokens=visual_tokens,
         )
 
     def step(
@@ -295,11 +360,13 @@ class JEDM2Model(nn.Module):
         token_id_or_embed: torch.Tensor,
         states: Optional[List[Tuple[Any, Any, Any]]] = None,
         pos: int = 0,
+        visual_tokens: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, ActionOutput, List[Tuple[Any, Any, Any]]]:
         """
         Autoregressive multi-step recurrent rollout step.
         Propagates a single token through all stacked layers while preserving
         layer-wise Mamba rolling state buffers and MLA dynamic KV caches.
+        Supports visual grounding on visual patch tokens.
 
         Args:
             token_id_or_embed: Single token ID tensor of shape [B] or [B, 1],
@@ -307,6 +374,7 @@ class JEDM2Model(nn.Module):
             states: Optional list of per-layer state tuples:
                     [(ssm_state_l, conv_state_l, kv_cache_l), ...] for l in 0..num_layers-1.
             pos: Current sequence position (0-indexed).
+            visual_tokens: Optional visual patch tokens [B, N_v, hidden_dim] for coordinate grounding.
 
         Returns:
             Tuple of:
@@ -342,8 +410,8 @@ class JEDM2Model(nn.Module):
         # System 2: LM Logits at timestep t: [B, vocab_size]
         lm_logits_t = self.lm_head(h_t)
 
-        # System 1: Action outputs at timestep t
-        action_output_t = self.action_head(h_t)
+        # System 1: Action outputs at timestep t with optional visual grounding
+        action_output_t = self.action_head(h_t, visual_tokens=visual_tokens)
 
         return lm_logits_t, action_output_t, next_states
 
