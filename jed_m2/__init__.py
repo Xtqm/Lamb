@@ -2,6 +2,11 @@
 JED-M2: Native Large Action Model (LAM) Architecture in PyTorch.
 """
 
+from jed_m2.agent import (
+    AgentStepOutput,
+    JEDM2Agent,
+    TurnRecord,
+)
 from jed_m2.config import JEDM2Config
 from jed_m2.dataset import (
     AgentTrajectoryDataset,
@@ -12,6 +17,13 @@ from jed_m2.dataset import (
     TrajectoryCollator,
     TrajectorySample,
     UIElement,
+)
+from jed_m2.environment import (
+    EnvironmentState,
+    ScenarioDefinition,
+    StepResult,
+    WebOSEnvironment,
+    get_default_scenarios,
 )
 from jed_m2.heads import (
     ActionGate,
@@ -93,4 +105,12 @@ __all__ = [
     "calculate_dpo_loss",
     "calculate_grpo_loss",
     "compute_token_log_probs",
+    "WebOSEnvironment",
+    "EnvironmentState",
+    "StepResult",
+    "ScenarioDefinition",
+    "get_default_scenarios",
+    "JEDM2Agent",
+    "AgentStepOutput",
+    "TurnRecord",
 ]

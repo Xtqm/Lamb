@@ -67,11 +67,13 @@ Lamb/
 ├── .gitignore                  # Python, PyTorch, and deep learning artifacts filter
 ├── PROJECT_CONTEXT.md          # Core architecture, specs & progress tracker
 ├── train.py                    # Production CLI training entrypoint with live metrics
+├── interactive_agent.py        # Phase 6A Interactive CLI with ASCII visual canvas
 ├── verify_phase1.py            # Phase 1 standalone hardware & tensor test (MLA + MoE)
 ├── verify_phase2.py            # Phase 2 SSM + JEPA verification test
 ├── verify_phase3.py            # Phase 3 Action heads & backbone rollout test
 ├── verify_phase4.py            # Phase 4 Dataset collation & composite loss test
 ├── verify_phase5.py            # Phase 5 End-to-end training benchmark & VRAM ceiling test
+├── verify_phase6a.py           # Phase 6A Environment, runtime rollout & constant-memory test
 ├── openspec/                   # Spec-driven development framework & archived changes
 └── jed_m2/
     ├── __init__.py             # Exports public modules
@@ -85,7 +87,9 @@ Lamb/
     ├── dataset.py              # WebArena/Mind2Web synthetic trajectory generator & collator
     ├── losses.py               # Calibrated multi-task composite loss harness
     ├── trainer.py              # Memory-calibrated training loop, optimizer factory & checkpointing
-    └── rl.py                   # Direct Policy Optimization (DPO) & Group Relative Policy Optimization (GRPO)
+    ├── rl.py                   # Direct Policy Optimization (DPO) & Group Relative Policy Optimization (GRPO)
+    ├── environment.py          # Phase 6A Simulated Web/OS sandbox environment state machine
+    └── agent.py                # Phase 6A Interactive runtime engine with O(1) recurrent rollout
 ```
 
 ---
@@ -174,6 +178,45 @@ Lamb/
   - Passes atomic checkpoint saving and reload parity check.
   - Passes DPO and GRPO loss and gradient calculation checks.
   - Peak GPU VRAM allocated: **748.10 MB** (0.73 GB), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit).
+
+### [DONE] Phase 6A: Interactive Agent Runtime & Execution Benchmarks
+- [x] Implement simulated interactive Web/OS sandbox environment (`jed_m2/environment.py`):
+  - `WebOSEnvironment`: State machine tracking interactive UI element trees (buttons, text inputs, dropdowns, links, navigation targets) with bounding boxes and normalized coordinates.
+  - Action execution handler for primitives (CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH).
+  - Ground-truth task completion verification and step reward calculation.
+- [x] Implement interactive agent runtime wrapper (`jed_m2/agent.py`):
+  - `JEDM2Agent`: Execution engine wrapping `JEDM2Model` for live decision-making.
+  - Leverages $O(1)$ constant-memory autoregressive recurrent rollout via `step(...)` preserving layer-wise Mamba SSM states, conv buffers, and MLA KV-cache across multiple turns.
+  - Decoupled System 1 / System 2 execution loop: Generates latent thought tokens (System 2) until `ActionGate` signals action emission, then predicts discrete primitive, continuous $(x, y) \in [0, 1]$ screen coordinates, and argument payloads (System 1).
+  - Observation parsing, action history tracking, and turn management.
+- [x] Implement interactive agent CLI script (`interactive_agent.py`):
+  - Interactive terminal interface for manual goal input, step-by-step observation-thought-action inspection, and ASCII UI screen canvas visualization.
+- [x] Public API exposure in `jed_m2/__init__.py`.
+- [x] Implement and execute `verify_phase6a.py` benchmarking:
+  - $O(1)$ constant memory invariance over long-horizon rollouts (up to 64 consecutive turns): 131.97 MB (step 16) to 137.37 MB (step 64), 4.09% variance (< 5.0% limit).
+  - Per-step rollout latency profiling on CUDA in `bfloat16`: **13.67 ms/step** mean latency (**13.46 ms/step** median) on NVIDIA GeForce RTX 5060 Laptop GPU.
+  - Task completion accuracy and multi-turn workflow transitions verified across ecommerce, travel, and os_admin domains.
+  - Assert zero NaNs/Infs across all outputs and recurrent state tensors.
+  - Peak GPU VRAM allocated: **144.81 MB** (0.14 GB), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit).
+
+### [NEXT] Phase 6B: Active Online Policy Optimization (RL with DPO / GRPO Rollout Pipeline)
+- [ ] Implement online trajectory rollout sampler (`jed_m2/rl_pipeline.py`) utilizing `JEDM2Agent` in simulated environments.
+- [ ] Implement group sampling ($G$ rollouts per task prompt) with outcome reward scoring.
+- [ ] Implement active online GRPO training loop updating active policy against reference policy with KL divergence control (`train_rl.py`).
+- [ ] Implement paired trajectory dataset generator for offline DPO preference optimization.
+- [ ] Implement and run `verify_phase6b.py` verifying reward improvements over 25 RL iterations.
+
+### [PENDING] Phase 6C: Production SFT Training Run & Convergence Benchmarking (Full Training)
+- [ ] Execute large-scale multi-epoch supervised fine-tuning run on synthetic web/OS trajectory corpus (10,000+ trajectories, 1,000–5,000 steps) using `train.py`.
+- [ ] Log and plot convergence curves across all 6 loss heads (reasoning, gate, primitive, coordinates, JEPA, MoE load balancing).
+- [ ] Evaluate coordinate Mean Absolute Error (MAE) descent and primitive classification accuracy on held-out evaluation trajectories.
+- [ ] Curate and save baseline production checkpoint (`checkpoints/jed_m2_sft_base.pt`).
+
+### [PENDING] Phase 6D: Visual Action Grounding (Multimodal Vision-LAM Extension)
+- [ ] Implement lightweight pure PyTorch visual patch encoder (`jed_m2/vision.py`) mapping RGB screenshot patches to visual embedding tokens.
+- [ ] Extend `JEPAWorldModel` (`jed_m2/jepa.py`) and `JEDM2Model` (`jed_m2/model.py`) to accept dual multimodal observations (DOM tokens + visual screenshot patches).
+- [ ] Cross-attention / early-fusion visual grounding for spatial coordinate regression.
+- [ ] Implement and run `verify_phase6d.py` verifying multimodal forward/backward pass and coordinate grounding on visual features within the 6.0 GB VRAM ceiling.
 
 ---
 
