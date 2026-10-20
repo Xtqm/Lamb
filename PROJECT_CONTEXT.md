@@ -67,6 +67,7 @@ Lamb/
 ├── .gitignore                  # Python, PyTorch, and deep learning artifacts filter
 ├── PROJECT_CONTEXT.md          # Core architecture, specs & progress tracker
 ├── train.py                    # Production CLI training entrypoint with live metrics
+├── train_rl.py                 # Production CLI online GRPO and offline DPO training script
 ├── interactive_agent.py        # Phase 6A Interactive CLI with ASCII visual canvas
 ├── verify_phase1.py            # Phase 1 standalone hardware & tensor test (MLA + MoE)
 ├── verify_phase2.py            # Phase 2 SSM + JEPA verification test
@@ -74,6 +75,7 @@ Lamb/
 ├── verify_phase4.py            # Phase 4 Dataset collation & composite loss test
 ├── verify_phase5.py            # Phase 5 End-to-end training benchmark & VRAM ceiling test
 ├── verify_phase6a.py           # Phase 6A Environment, runtime rollout & constant-memory test
+├── verify_phase6b.py           # Phase 6B RL rollouts, DPO/GRPO training & memory ceiling test
 ├── openspec/                   # Spec-driven development framework & archived changes
 └── jed_m2/
     ├── __init__.py             # Exports public modules
@@ -88,6 +90,7 @@ Lamb/
     ├── losses.py               # Calibrated multi-task composite loss harness
     ├── trainer.py              # Memory-calibrated training loop, optimizer factory & checkpointing
     ├── rl.py                   # Direct Policy Optimization (DPO) & Group Relative Policy Optimization (GRPO)
+    ├── rl_pipeline.py          # Phase 6B Interactive rollout sampler, group advantages & preference pairs
     ├── environment.py          # Phase 6A Simulated Web/OS sandbox environment state machine
     └── agent.py                # Phase 6A Interactive runtime engine with O(1) recurrent rollout
 ```
@@ -199,14 +202,28 @@ Lamb/
   - Assert zero NaNs/Infs across all outputs and recurrent state tensors.
   - Peak GPU VRAM allocated: **144.81 MB** (0.14 GB), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit).
 
-### [NEXT] Phase 6B: Active Online Policy Optimization (RL with DPO / GRPO Rollout Pipeline)
-- [ ] Implement online trajectory rollout sampler (`jed_m2/rl_pipeline.py`) utilizing `JEDM2Agent` in simulated environments.
-- [ ] Implement group sampling ($G$ rollouts per task prompt) with outcome reward scoring.
-- [ ] Implement active online GRPO training loop updating active policy against reference policy with KL divergence control (`train_rl.py`).
-- [ ] Implement paired trajectory dataset generator for offline DPO preference optimization.
-- [ ] Implement and run `verify_phase6b.py` verifying reward improvements over 25 RL iterations.
+### [DONE] Phase 6B: Active Online Policy Optimization (RL with DPO / GRPO Rollout Pipeline)
+- [x] Implement online trajectory rollout sampler (`jed_m2/rl_pipeline.py`) utilizing `JEDM2Agent` in simulated environments:
+  - `RolloutTrajectory` and `RolloutTurn` containers for multi-turn trajectory records.
+  - `TrajectoryRolloutSampler` wrapping model recurrent steps with temperature-scaled System 2 rationale exploration and System 1 action primitive sampling.
+  - Group rollout collection ($G$ rollouts per task prompt) with group advantage normalization $A_i = (R_i - \mu) / (\sigma + \epsilon)$ for GRPO.
+  - Preference dataset generator (`create_preference_pairs`, `collate_preference_pairs`) pairing winning ($R=1.0$) and losing ($R=0.0$) trajectories for DPO.
+  - Dynamic tensor collation padding sequences into `(input_ids, targets, mask, old_token_logps, rewards)` for policy updates.
+- [x] Implement CLI training script (`train_rl.py`):
+  - Online GRPO training loop: samples groups of $G$ rollouts across benchmark environments, normalizes advantages within each group, and computes clipped surrogate policy gradient updates with reference policy KL divergence regularization.
+  - Offline DPO training loop: samples or loads paired preference trajectories and optimizes the implicit reward margin between winning and losing trajectories.
+  - Live ASCII telemetry reporting average episode reward, advantage variance, reference KL divergence, clip fraction, parameter gradient norms, and token throughput.
+  - Checkpoint persistence for RL-optimized policy weights.
+- [x] Public API exposure in `jed_m2/__init__.py`.
+- [x] Implement and execute `verify_phase6b.py`:
+  - Passes multi-group rollout sampling ($G=4$) and group advantage normalization.
+  - Passes DPO preference pairing, implicit reward margin calculation, and loss backpropagation with clean gradients.
+  - Passes GRPO clipped surrogate objective evaluation and reference model KL constraint ($D_{\text{KL}} \ge 0$).
+  - Passes 25-iteration online GRPO training loop demonstrating stable reward improvement on simulated tasks.
+  - Zero NaNs / Infs across all parameter gradients; reference model gradients strictly isolated (`param.grad is None`).
+  - Peak GPU VRAM allocated: **668.63 MB** (0.65 GB), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit) on NVIDIA GeForce RTX 5060 Laptop GPU in `bfloat16`.
 
-### [PENDING] Phase 6C: Production SFT Training Run & Convergence Benchmarking (Full Training)
+### [NEXT] Phase 6C: Production SFT Training Run & Convergence Benchmarking (Full Training)
 - [ ] Execute large-scale multi-epoch supervised fine-tuning run on synthetic web/OS trajectory corpus (10,000+ trajectories, 1,000–5,000 steps) using `train.py`.
 - [ ] Log and plot convergence curves across all 6 loss heads (reasoning, gate, primitive, coordinates, JEPA, MoE load balancing).
 - [ ] Evaluate coordinate Mean Absolute Error (MAE) descent and primitive classification accuracy on held-out evaluation trajectories.

@@ -195,7 +195,8 @@ def calculate_grpo_loss(
 
     # 4. Token-level KL divergence penalty against reference policy (Schulman unbiased estimator):
     # D_KL(pi || pi_ref) approx exp(log_ref - log_pi) - (log_ref - log_pi) - 1
-    kl_ratio = ref_token_logps - policy_token_logps
+    # Clamped to [-5.0, 5.0] to prevent exponential numerical explosion under bfloat16
+    kl_ratio = (ref_token_logps - policy_token_logps).clamp(min=-5.0, max=5.0)
     kl_penalty = torch.exp(kl_ratio) - kl_ratio - 1.0  # [B, S]
 
     # 5. Composite token objective: [B, S]

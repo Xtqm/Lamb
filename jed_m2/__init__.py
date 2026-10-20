@@ -54,6 +54,11 @@ from jed_m2.rl import (
     calculate_grpo_loss,
     compute_token_log_probs,
 )
+from jed_m2.rl_pipeline import (
+    RolloutTrajectory,
+    RolloutTurn,
+    TrajectoryRolloutSampler,
+)
 from jed_m2.trainer import (
     JEDM2Trainer,
     JEDM2TrainerConfig,
@@ -113,4 +118,7 @@ __all__ = [
     "JEDM2Agent",
     "AgentStepOutput",
     "TurnRecord",
+    "TrajectoryRolloutSampler",
+    "RolloutTrajectory",
+    "RolloutTurn",
 ]
