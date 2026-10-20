@@ -1,0 +1,100 @@
+{
+  "config": {
+    "max_steps": 10,
+    "batch_size": 16,
+    "micro_batch_size": 2,
+    "seq_len": 2048,
+    "lr": 0.0003,
+    "min_lr": 3e-05,
+    "seed": 42,
+    "device": "cuda",
+    "gpu_name": "NVIDIA GeForce RTX 5060 Laptop GPU"
+  },
+  "train": [
+    {
+      "step": 10,
+      "accum_step": 80,
+      "loss_total": 1013.9812622070312,
+      "loss_reason": 500.9430847167969,
+      "loss_gate": 0.6128275990486145,
+      "loss_action_type": 1.7627841234207153,
+      "loss_coord": 0.13531123101711273,
+      "loss_arg": 508.79998779296875,
+      "loss_jepa": 1.1253790855407715,
+      "loss_aux": 0.0606762170791626,
+      "acc_action_type": 0.27272728085517883,
+      "coord_mae": 0.1582728922367096,
+      "jepa_loss_total": 1.1253790855407715,
+      "jepa_loss_smooth_l1": 0.6707000136375427,
+      "jepa_loss_cos_dist": 0.909358024597168,
+      "jepa_cos_sim": 0.09064198285341263,
+      "grad_norm": 117.5,
+      "lr": 3.2999999999999996e-05,
+      "tok_per_sec": 349.0883233752177,
+      "peak_vram_mb": 748.10205078125,
+      "elapsed_sec": 143.04689288139343
+    }
+  ],
+  "eval": [
+    {
+      "step": 5,
+      "val_loss_total": 1013.9204711914062,
+      "val_loss_reason": 502.1039733886719,
+      "val_loss_gate": 0.6204322576522827,
+      "val_loss_action_type": 1.799923062324524,
+      "val_loss_coord": 0.15899114310741425,
+      "val_loss_arg": 507.3999938964844,
+      "val_loss_jepa": 1.1406499147415161,
+      "val_loss_aux": 0.06052246317267418,
+      "val_acc_action_type": 0.13257576152682304,
+      "val_coord_mae": 0.1825435683131218,
+      "val_jepa_loss_total": 1.1406499147415161,
+      "val_jepa_loss_smooth_l1": 0.6782750189304352,
+      "val_jepa_loss_cos_dist": 0.9247497022151947,
+      "val_jepa_cos_sim": 0.07525029219686985
+    },
+    {
+      "step": 10,
+      "val_loss_total": 1004.7807922363281,
+      "val_loss_reason": 498.7841033935547,
+      "val_loss_gate": 0.6184387505054474,
+      "val_loss_action_type": 1.7848603129386902,
+      "val_loss_coord": 0.15849129110574722,
+      "val_loss_arg": 501.6000061035156,
+      "val_loss_jepa": 1.140436053276062,
+      "val_loss_aux": 0.0605155136436224,
+      "val_acc_action_type": 0.13257576152682304,
+      "val_coord_mae": 0.182001031935215,
+      "val_jepa_loss_total": 1.140436053276062,
+      "val_jepa_loss_smooth_l1": 0.6781706809997559,
+      "val_jepa_loss_cos_dist": 0.9245308041572571,
+      "val_jepa_cos_sim": 0.07546917907893658
+    }
+  ],
+  "summary": {
+    "total_steps": 10,
+    "total_tokens": 49936,
+    "total_time_sec": 143.93410062789917,
+    "mean_tokens_per_sec": 346.9365479212975,
+    "final_train_loss": 1013.9812622070312,
+    "final_metrics": {
+      "loss_total": 1013.9812622070312,
+      "loss_reason": 500.9430847167969,
+      "loss_gate": 0.6128275990486145,
+      "loss_action_type": 1.7627841234207153,
+      "loss_coord": 0.13531123101711273,
+      "loss_arg": 508.79998779296875,
+      "loss_jepa": 1.1253790855407715,
+      "loss_aux": 0.0606762170791626,
+      "acc_action_type": 0.27272728085517883,
+      "coord_mae": 0.1582728922367096,
+      "jepa_loss_total": 1.1253790855407715,
+      "jepa_loss_smooth_l1": 0.6707000136375427,
+      "jepa_loss_cos_dist": 0.909358024597168,
+      "jepa_cos_sim": 0.09064198285341263,
+      "grad_norm": 117.5
+    },
+    "final_checkpoint": "C:\\Users\\caleb\\Documents\\Coding\\AI\\Meta-Experiment-AiByAi\\Lamb\\checkpoints\\checkpoint_final.pt",
+    "baseline_checkpoint": "C:\\Users\\caleb\\Documents\\Coding\\AI\\Meta-Experiment-AiByAi\\Lamb\\checkpoints\\jed_m2_sft_base.pt"
+  }
+}

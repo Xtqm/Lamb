@@ -288,6 +288,92 @@ class JEDM2Trainer:
 
         return loss_val, metrics
 
+    @torch.no_grad()
+    def evaluation_step(
+        self,
+        batch: TrajectoryBatch,
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Executes a single validation/evaluation step on a micro-batch without gradient calculation.
+
+        Args:
+            batch: Dynamically collated TrajectoryBatch on target device.
+
+        Returns:
+            Tuple of (unscaled_total_loss_float, detached_metrics_dict).
+        """
+        self.model.eval()
+
+        with torch.autocast(
+            device_type=self.device.type,
+            dtype=self.dtype,
+            enabled=(self.device.type == "cuda"),
+        ):
+            # Sequence-parallel forward pass without parameter gradients
+            # input_ids: [B, S], attention_mask: [B, 1, S, S]
+            output: JEDM2Output = self.model(
+                input_ids=batch.input_ids,
+                attention_mask=batch.attention_mask,
+                obs_t=batch.jepa_obs_t,
+                action_t=batch.jepa_action_t,
+                obs_next=batch.jepa_obs_next,
+            )
+
+            # Evaluate composite multi-task loss and diagnostic metrics
+            total_loss, metrics = self.loss_fn(output, batch)
+
+        loss_val = total_loss.item()
+        return loss_val, metrics
+
+    @torch.no_grad()
+    def evaluate(
+        self,
+        dataset: Any,
+        collator: Any,
+        max_eval_steps: int = 20,
+        micro_batch_size: Optional[int] = None,
+        start_idx: int = 0,
+    ) -> Dict[str, float]:
+        """
+        Evaluates the model over a held-out evaluation dataset, aggregating multi-head losses,
+        coordinate MAE, and primitive accuracy across multiple evaluation batches.
+
+        Args:
+            dataset: Evaluation dataset instance (e.g. AgentTrajectoryDataset).
+            collator: Batch collator instance (e.g. TrajectoryCollator).
+            max_eval_steps: Maximum number of micro-batches to evaluate.
+            micro_batch_size: Micro-batch size per step (defaults to config.micro_batch_size).
+            start_idx: Starting index in dataset.
+
+        Returns:
+            Dictionary of mean validation metrics across evaluated batches prefixed with 'val_'.
+        """
+        m_bs = micro_batch_size or self.config.micro_batch_size
+        metric_sums: Dict[str, float] = {}
+        eval_batches = 0
+        current_idx = start_idx
+
+        for _ in range(max_eval_steps):
+            samples = []
+            for _ in range(m_bs):
+                samples.append(dataset[current_idx % len(dataset)])
+                current_idx += 1
+
+            batch = collator(samples).to(self.device, dtype=self.dtype)
+            step_loss, step_metrics = self.evaluation_step(batch)
+
+            for k, v in step_metrics.items():
+                metric_sums[k] = metric_sums.get(k, 0.0) + float(v)
+            eval_batches += 1
+
+        if eval_batches == 0:
+            return {}
+
+        avg_metrics: Dict[str, float] = {
+            f"val_{k}": v / eval_batches for k, v in metric_sums.items()
+        }
+        return avg_metrics
+
     def save_checkpoint(
         self,
         filepath: str,

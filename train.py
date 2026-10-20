@@ -7,10 +7,11 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from jed_m2.config import JEDM2Config
@@ -48,11 +49,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset_size", type=int, default=10000, help="Virtual dataset size")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--no_checkpointing", action="store_true", help="Disable activation checkpointing")
+
+    # Validation & Evaluation
+    parser.add_argument("--eval_interval", type=int, default=0, help="Step interval to run validation evaluation (0 = disabled)")
+    parser.add_argument("--eval_steps", type=int, default=10, help="Number of micro-batches per evaluation pass")
+    parser.add_argument("--eval_dataset_size", type=int, default=1000, help="Held-out evaluation dataset size")
+    parser.add_argument("--export_history", type=str, default=None, help="File path to save JSON training and validation history")
+    parser.add_argument("--baseline_checkpoint", type=str, default=None, help="Explicit target path to save baseline production checkpoint")
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def main(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
+    if args is None:
+        args = parse_args()
 
     # Device & Precision setup
     if torch.cuda.is_available():
@@ -77,6 +86,12 @@ def main() -> None:
     print(f"Learning Rate         : {args.lr} -> {args.min_lr} (Warmup: {args.warmup_steps} steps)")
     print(f"Gradient Checkpointing: {'DISABLED' if args.no_checkpointing else 'ENABLED'}")
     print(f"Checkpoint Directory  : {args.checkpoint_dir}")
+    if args.eval_interval > 0:
+        print(f"Validation Interval   : Every {args.eval_interval} steps ({args.eval_steps} micro-batches)")
+    if args.baseline_checkpoint:
+        print(f"Baseline Checkpoint   : {args.baseline_checkpoint}")
+    if args.export_history:
+        print(f"History Export Path   : {args.export_history}")
     print("=" * 80 + "\n")
 
     # Instantiate model and loss configurations
@@ -125,11 +140,40 @@ def main() -> None:
     )
     collator = TrajectoryCollator(config=model_config, max_seq_len=args.seq_len)
 
+    # Held-out evaluation dataset
+    val_dataset: Optional[AgentTrajectoryDataset] = None
+    if args.eval_interval > 0:
+        val_dataset = AgentTrajectoryDataset(
+            config=model_config,
+            virtual_size=args.eval_dataset_size,
+            seed=args.seed + 1000,
+        )
+        print(f"[Init] Held-out validation dataset instantiated (size={args.eval_dataset_size}, seed={args.seed + 1000})")
+
+    # Telemetry and history tracking
+    history: Dict[str, Any] = {
+        "config": {
+            "max_steps": args.max_steps,
+            "batch_size": args.batch_size,
+            "micro_batch_size": args.micro_batch_size,
+            "seq_len": args.seq_len,
+            "lr": args.lr,
+            "min_lr": args.min_lr,
+            "seed": args.seed,
+            "device": str(device),
+            "gpu_name": gpu_name,
+        },
+        "train": [],
+        "eval": [],
+        "summary": {},
+    }
+
     # Training Loop
     total_tokens_processed = 0
     start_time = time.time()
     last_log_time = start_time
     last_log_tokens = 0
+    last_eval_step = -1
 
     print("\n[Training] Starting training iterations...")
     data_idx = 0
@@ -168,6 +212,19 @@ def main() -> None:
                     peak_vram_mb = torch.cuda.max_memory_allocated() / (1024**2)
 
                 current_lr = trainer.get_current_lr()
+
+                record = {
+                    "step": trainer.global_step,
+                    "accum_step": trainer.accum_step,
+                    "loss_total": step_loss,
+                    **step_metrics,
+                    "lr": current_lr,
+                    "tok_per_sec": tokens_per_sec,
+                    "peak_vram_mb": peak_vram_mb,
+                    "elapsed_sec": now - start_time,
+                }
+                history["train"].append(record)
+
                 print(
                     f"Step {trainer.global_step:5d}/{args.max_steps} | "
                     f"Loss: {step_loss:7.4f} | "
@@ -180,9 +237,42 @@ def main() -> None:
                     f"VRAM: {peak_vram_mb:6.1f} MB"
                 )
 
+            # Periodic validation evaluation
+            if (
+                val_dataset is not None
+                and trainer.global_step > 0
+                and trainer.global_step % args.eval_interval == 0
+                and trainer.accum_step % grad_accum_steps == 0
+                and trainer.global_step != last_eval_step
+            ):
+                last_eval_step = trainer.global_step
+                print(f"  --> [Validation] Running evaluation at step {trainer.global_step} ({args.eval_steps} micro-batches)...")
+                val_metrics = trainer.evaluate(
+                    val_dataset,
+                    collator,
+                    max_eval_steps=args.eval_steps,
+                    micro_batch_size=args.micro_batch_size,
+                )
+                eval_record = {
+                    "step": trainer.global_step,
+                    **val_metrics,
+                }
+                history["eval"].append(eval_record)
+                print(
+                    f"  --> [Validation] Step {trainer.global_step:5d} | "
+                    f"Val Loss: {val_metrics.get('val_loss_total', 0.0):7.4f} | "
+                    f"Reason: {val_metrics.get('val_loss_reason', 0.0):6.4f} | "
+                    f"Type: {val_metrics.get('val_loss_action_type', 0.0):6.4f} | "
+                    f"Coord: {val_metrics.get('val_loss_coord', 0.0):6.4f} | "
+                    f"JEPA: {val_metrics.get('val_loss_jepa', 0.0):6.4f} | "
+                    f"Type Acc: {val_metrics.get('val_acc_action_type', 0.0)*100:5.1f}% | "
+                    f"Coord MAE: {val_metrics.get('val_coord_mae', 0.0):6.4f}"
+                )
+
             # Periodic checkpointing
             if (
-                trainer.global_step > 0
+                args.save_interval > 0
+                and trainer.global_step > 0
                 and trainer.global_step % args.save_interval == 0
                 and trainer.accum_step % grad_accum_steps == 0
             ):
@@ -192,23 +282,78 @@ def main() -> None:
                 saved_path = trainer.save_checkpoint(ckpt_file)
                 print(f"  [Checkpoint] Saved step checkpoint: {saved_path}")
 
+        # Final evaluation pass if validation enabled
+        if val_dataset is not None and last_eval_step != trainer.global_step:
+            print(f"  --> [Validation] Running final evaluation at step {trainer.global_step}...")
+            val_metrics = trainer.evaluate(
+                val_dataset,
+                collator,
+                max_eval_steps=args.eval_steps,
+                micro_batch_size=args.micro_batch_size,
+            )
+            history["eval"].append({"step": trainer.global_step, **val_metrics})
+
         # Final checkpoint save
         final_ckpt = os.path.join(args.checkpoint_dir, "checkpoint_final.pt")
         saved_final = trainer.save_checkpoint(final_ckpt)
         total_time = time.time() - start_time
+
+        # Baseline checkpoint save if specified
+        saved_baseline = None
+        if args.baseline_checkpoint:
+            saved_baseline = trainer.save_checkpoint(
+                args.baseline_checkpoint,
+                additional_info={
+                    "is_baseline": True,
+                    "baseline_name": "jed_m2_sft_base",
+                    "step": trainer.global_step,
+                    "final_loss": step_loss,
+                },
+            )
+
+        history["summary"] = {
+            "total_steps": trainer.global_step,
+            "total_tokens": total_tokens_processed,
+            "total_time_sec": total_time,
+            "mean_tokens_per_sec": total_tokens_processed / max(total_time, 1e-6),
+            "final_train_loss": step_loss,
+            "final_metrics": step_metrics,
+            "final_checkpoint": saved_final,
+            "baseline_checkpoint": saved_baseline,
+        }
+
+        # Export metrics history JSON if configured
+        if args.export_history:
+            export_dir = os.path.dirname(os.path.abspath(args.export_history))
+            if export_dir:
+                os.makedirs(export_dir, exist_ok=True)
+            with open(args.export_history, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2)
+            print(f"Metrics History Saved : {os.path.abspath(args.export_history)}")
+
         print("\n" + "=" * 80)
         print("      Training Complete!")
         print(f"Total Steps Completed : {trainer.global_step}")
         print(f"Total Tokens Trained  : {total_tokens_processed:,}")
         print(f"Total Wall Time       : {total_time:.2f}s")
         print(f"Final Checkpoint      : {saved_final}")
+        if saved_baseline:
+            print(f"Baseline Checkpoint   : {saved_baseline}")
         print("=" * 80 + "\n")
+
+        return history
 
     except KeyboardInterrupt:
         print("\n[Notice] Training interrupted by user. Saving emergency checkpoint...")
         emergency_ckpt = os.path.join(args.checkpoint_dir, "checkpoint_interrupted.pt")
         trainer.save_checkpoint(emergency_ckpt)
         print(f"[Notice] Emergency checkpoint saved to: {emergency_ckpt}")
+        if args.export_history:
+            export_dir = os.path.dirname(os.path.abspath(args.export_history))
+            if export_dir:
+                os.makedirs(export_dir, exist_ok=True)
+            with open(args.export_history, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2)
         sys.exit(0)
 
 
