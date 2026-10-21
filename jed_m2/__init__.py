@@ -7,6 +7,15 @@ from jed_m2.agent import (
     JEDM2Agent,
     TurnRecord,
 )
+from jed_m2.baselines import (
+    DenseSwiGLUFFN,
+    StandardMHA,
+    create_baseline_a,
+    create_baseline_b,
+    create_baseline_c,
+    create_baseline_d,
+    get_baseline_config,
+)
 from jed_m2.benchmark import (
     BenchmarkSummary,
     EpisodeMetric,
@@ -97,6 +106,13 @@ from jed_m2.vision import (
 
 __all__ = [
     "JEDM2Config",
+    "StandardMHA",
+    "DenseSwiGLUFFN",
+    "get_baseline_config",
+    "create_baseline_a",
+    "create_baseline_b",
+    "create_baseline_c",
+    "create_baseline_d",
     "MultiHeadLatentAttention",
     "RotaryEmbedding",
     "RMSNorm",

@@ -38,9 +38,9 @@ class CurriculumScheduler:
     """
 
     LEVEL_CONFIGS = {
-        1: {"name": "Level 1: Atomic (1-Step)", "max_turns": 1, "complexity": 1},
-        2: {"name": "Level 2: Compound (2-3 Steps)", "max_turns": 3, "complexity": 2},
-        3: {"name": "Level 3: Long-Horizon (5-8 Steps)", "max_turns": 8, "complexity": 3},
+        1: {"name": "Level 1: Focused (4 Turns)", "max_turns": 4, "complexity": 1},
+        2: {"name": "Level 2: Compound (6 Turns)", "max_turns": 6, "complexity": 2},
+        3: {"name": "Level 3: Long-Horizon (8 Turns)", "max_turns": 8, "complexity": 3},
     }
 
     def __init__(
@@ -189,6 +189,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable multi-tier curriculum learning (Level 1 -> 2 -> 3) on dynamic procedural environments",
     )
+    parser.add_argument(
+        "--success_threshold",
+        type=float,
+        default=0.80,
+        help="Moving success rate threshold required to advance curriculum tiers (e.g. 0.60 for 60%%)",
+    )
+    parser.add_argument(
+        "--window_size",
+        type=int,
+        default=10,
+        help="Rolling window size of episodes for curriculum success tracking",
+    )
 
     # DPO Hyperparameters
     parser.add_argument("--beta_dpo", type=float, default=0.1, help="Implicit reward scaling temperature beta for DPO")
@@ -313,13 +325,22 @@ def main() -> None:
         dtype=dtype,
     )
 
-    curriculum = CurriculumScheduler() if args.curriculum else None
+    curriculum = (
+        CurriculumScheduler(
+            success_threshold=args.success_threshold,
+            window_size=args.window_size,
+        )
+        if args.curriculum
+        else None
+    )
     scenario_gen = (
         DynamicScenarioGenerator(config=model_config, device=device, dtype=dtype)
         if args.curriculum
         else None
     )
-    if args.curriculum and args.scenarios == "ecommerce,travel,os_admin":
+    if args.scenarios in ("ecommerce,travel,os_admin", "procedural", "all") and args.curriculum:
+        scenarios = list(DynamicScenarioGenerator.AVAILABLE_DOMAINS)
+    elif args.scenarios in ("procedural", "all"):
         scenarios = list(DynamicScenarioGenerator.AVAILABLE_DOMAINS)
 
     sched = ExplorationScheduler(
@@ -375,9 +396,9 @@ def main() -> None:
                 seed=args.seed + iteration * 100 if scenario_gen is not None else None,
             )
 
-            # Record outcomes for curriculum advancement
+            # Record outcomes for curriculum advancement (goal success or positive milestone)
             if curriculum is not None:
-                advanced = curriculum.record_outcomes([t.success for t in group])
+                advanced = curriculum.record_outcomes([t.success or t.cumulative_reward > 0.0 for t in group])
                 if advanced:
                     print(f"  >>> [Curriculum] ADVANCED TO {curriculum.level_name.upper()}! <<<")
 

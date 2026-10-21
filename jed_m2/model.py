@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from jed_m2.config import JEDM2Config
+from jed_m2.baselines import DenseSwiGLUFFN, StandardMHA
 from jed_m2.heads import ActionOutput, NativeActionHead
 from jed_m2.jepa import JEPAWorldModel
 from jed_m2.mamba import MambaBlock
@@ -60,9 +61,9 @@ class JEDM2Block(nn.Module):
     Composite recurrent layer for JED-M2 Large Action Model.
 
     Execution Pipeline (Pre-RMSNorm with residual connections):
-    1. Mamba SSM Recurrence: x = x + MambaBlock(RMSNorm_1(x))
-    2. Multi-Head Latent Attention: x = x + MLA(RMSNorm_2(x))
-    3. Sparse Top-2 MoE: x = x + MoE(RMSNorm_3(x))
+    1. Mamba SSM Recurrence: x = x + MambaBlock(RMSNorm_1(x)) (if use_mamba)
+    2. Attention: x = x + Attention(RMSNorm_2(x)) (MLA or StandardMHA)
+    3. Feed-Forward: x = x + FFN(RMSNorm_3(x)) (Sparse Top-2 MoE or Dense SwiGLU)
 
     Supports both sequence-parallel forward and O(1) step modes.
     """
@@ -73,17 +74,41 @@ class JEDM2Block(nn.Module):
         self.hidden_dim = config.hidden_dim
         eps = config.layer_norm_eps
 
+        # Configuration toggles
+        self.use_mamba = getattr(config, "use_mamba", True)
+        self.attn_type = getattr(config, "attn_type", "mla")
+        self.ffn_type = getattr(config, "ffn_type", "moe")
+
         # 1. Sequential recurrence (Mamba SSM)
-        self.norm_mamba = RMSNorm(self.hidden_dim, eps=eps)
-        self.mamba = MambaBlock(config)
+        if self.use_mamba:
+            self.norm_mamba = RMSNorm(self.hidden_dim, eps=eps)
+            self.mamba = MambaBlock(config)
+        else:
+            self.norm_mamba = None
+            self.mamba = None
 
-        # 2. Compressed Latent Attention (MLA)
-        self.norm_mla = RMSNorm(self.hidden_dim, eps=eps)
-        self.mla = MultiHeadLatentAttention(config)
+        # 2. Attention (MLA or Standard MHA)
+        self.norm_attn = RMSNorm(self.hidden_dim, eps=eps)
+        if self.attn_type == "mha":
+            self.attn = StandardMHA(config)
+        else:
+            self.attn = MultiHeadLatentAttention(config)
 
-        # 3. Sparse routing feed-forward (Top-2 MoE)
-        self.norm_moe = RMSNorm(self.hidden_dim, eps=eps)
-        self.moe = SparseTop2MoE(config)
+        # Backward compatibility aliases
+        self.norm_mla = self.norm_attn
+        self.mla = self.attn
+
+        # 3. Feed-Forward Network (Sparse Top-2 MoE or Dense SwiGLU)
+        self.norm_ffn = RMSNorm(self.hidden_dim, eps=eps)
+        if self.ffn_type == "dense":
+            dense_dim = getattr(config, "dense_intermediate_dim", 1024)
+            self.ffn = DenseSwiGLUFFN(self.hidden_dim, dense_dim)
+        else:
+            self.ffn = SparseTop2MoE(config)
+
+        # Backward compatibility aliases
+        self.norm_moe = self.norm_ffn
+        self.moe = self.ffn
 
     def forward(
         self,
@@ -95,25 +120,30 @@ class JEDM2Block(nn.Module):
 
         Args:
             x: Input tensor of shape [batch_size, seq_len, hidden_dim].
-            attention_mask: Optional attention mask for MLA.
+            attention_mask: Optional attention mask for Attention.
 
         Returns:
             Tuple of:
             - Output tensor of shape [batch_size, seq_len, hidden_dim].
-            - Auxiliary load-balancing loss from SparseTop2MoE.
+            - Auxiliary load-balancing loss (scalar, 0.0 for dense FFN).
         """
-        # 1. Mamba SSM with pre-RMSNorm & residual
-        # [B, S, D] -> [B, S, D]
-        x = x + self.mamba(self.norm_mamba(x))
+        # 1. Mamba SSM with pre-RMSNorm & residual (if enabled)
+        if self.use_mamba and self.mamba is not None:
+            # [B, S, D] -> [B, S, D]
+            x = x + self.mamba(self.norm_mamba(x))
 
-        # 2. Multi-Head Latent Attention with pre-RMSNorm & residual
+        # 2. Attention with pre-RMSNorm & residual
         # [B, S, D] -> [B, S, D]
-        x = x + self.mla(self.norm_mla(x), attention_mask=attention_mask)
+        x = x + self.attn(self.norm_attn(x), attention_mask=attention_mask)
 
-        # 3. Sparse Top-2 MoE with pre-RMSNorm & residual
-        # [B, S, D] -> [B, S, D], aux_loss: scalar
-        moe_out, aux_loss = self.moe(self.norm_moe(x))
-        x = x + moe_out
+        # 3. Feed-Forward with pre-RMSNorm & residual
+        # [B, S, D] -> [B, S, D]
+        if self.ffn_type == "dense":
+            ffn_out = self.ffn(self.norm_ffn(x))
+            aux_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+        else:
+            ffn_out, aux_loss = self.ffn(self.norm_ffn(x))
+        x = x + ffn_out
 
         return x, aux_loss
 
@@ -124,7 +154,7 @@ class JEDM2Block(nn.Module):
         pos: int = 0,
     ) -> Tuple[torch.Tensor, Tuple[Any, Any, Any]]:
         """
-        Recurrent single-step update preserving Mamba states and MLA KV cache.
+        Recurrent single-step update preserving Mamba states and KV cache.
 
         Args:
             x_t: Input token representation at timestep t, shape [B, D] or [B, 1, D].
@@ -138,28 +168,34 @@ class JEDM2Block(nn.Module):
         """
         ssm_state, conv_state, kv_cache = (None, None, None) if state is None else state
 
-        # 1. Mamba single-step
-        norm_mamba_in = self.norm_mamba(x_t)
-        mamba_out, next_ssm_state, next_conv_state = self.mamba.step(
-            norm_mamba_in, ssm_state=ssm_state, conv_state=conv_state
-        )
-        x_t = x_t + mamba_out
-
-        # 2. MLA single-step with KV-caching
-        norm_mla_in = self.norm_mla(x_t)
-        mla_out, next_kv_cache = self.mla.step(
-            norm_mla_in, kv_cache=kv_cache, pos=pos
-        )
-        x_t = x_t + mla_out
-
-        # 3. Sparse Top-2 MoE single-step (inference mode, aux loss ignored)
-        norm_moe_in = self.norm_moe(x_t)
-        if norm_moe_in.ndim == 2:
-            moe_out, _ = self.moe(norm_moe_in.unsqueeze(1))
-            moe_out = moe_out.squeeze(1)
+        # 1. Mamba single-step (if enabled)
+        if self.use_mamba and self.mamba is not None:
+            norm_mamba_in = self.norm_mamba(x_t)
+            mamba_out, next_ssm_state, next_conv_state = self.mamba.step(
+                norm_mamba_in, ssm_state=ssm_state, conv_state=conv_state
+            )
+            x_t = x_t + mamba_out
         else:
-            moe_out, _ = self.moe(norm_moe_in)
-        x_t = x_t + moe_out
+            next_ssm_state, next_conv_state = None, None
+
+        # 2. Attention single-step with KV-caching
+        norm_attn_in = self.norm_attn(x_t)
+        attn_out, next_kv_cache = self.attn.step(
+            norm_attn_in, kv_cache=kv_cache, pos=pos
+        )
+        x_t = x_t + attn_out
+
+        # 3. Feed-Forward single-step
+        norm_ffn_in = self.norm_ffn(x_t)
+        if self.ffn_type == "dense":
+            ffn_out = self.ffn(norm_ffn_in)
+        else:
+            if norm_ffn_in.ndim == 2:
+                ffn_out, _ = self.ffn(norm_ffn_in.unsqueeze(1))
+                ffn_out = ffn_out.squeeze(1)
+            else:
+                ffn_out, _ = self.ffn(norm_ffn_in)
+        x_t = x_t + ffn_out
 
         next_state = (next_ssm_state, next_conv_state, next_kv_cache)
         return x_t, next_state
@@ -205,8 +241,12 @@ class JEDM2Model(nn.Module):
         # 5. System 1: Native Action Decoding Heads
         self.action_head = NativeActionHead(self.config)
 
-        # 6. Latent World Model (JEPA)
-        self.jepa = JEPAWorldModel(self.config)
+        # 6. Latent World Model (JEPA) (if enabled)
+        self.use_jepa = getattr(self.config, "use_jepa", True)
+        if self.use_jepa:
+            self.jepa = JEPAWorldModel(self.config)
+        else:
+            self.jepa = None
 
         # 7. Vision Patch Encoder (Phase 6D)
         self.vision_encoder = VisionPatchEncoder(self.config)
@@ -334,7 +374,7 @@ class JEDM2Model(nn.Module):
 
         # JEPA World Model evaluation: connect directly to contextual backbone representations
         jepa_loss, jepa_metrics = None, None
-        if action_t is not None and obs_next is not None:
+        if self.jepa is not None and action_t is not None and obs_next is not None:
             if obs_t is not None:
                 h_jepa_in = obs_t
             else:
@@ -436,16 +476,19 @@ class JEDM2Model(nn.Module):
         # Compute inactive MoE parameters across all blocks
         inactive_moe_params = 0
         for block in self.blocks:
-            num_experts = block.moe.num_experts
-            top_k = block.moe.top_k
-            expert_params = sum(p.numel() for p in block.moe.experts.parameters())
-            single_expert_params = expert_params // num_experts
-            inactive_moe_params += (num_experts - top_k) * single_expert_params
+            if getattr(block, "ffn_type", "moe") == "moe" and hasattr(block, "moe") and hasattr(block.moe, "experts"):
+                num_experts = block.moe.num_experts
+                top_k = block.moe.top_k
+                expert_params = sum(p.numel() for p in block.moe.experts.parameters())
+                single_expert_params = expert_params // num_experts
+                inactive_moe_params += (num_experts - top_k) * single_expert_params
 
         # JEPA target encoder is non-trainable EMA parameters
-        target_encoder_params = sum(
-            p.numel() for p in self.jepa.target_encoder.parameters()
-        )
+        target_encoder_params = 0
+        if self.jepa is not None and hasattr(self.jepa, "target_encoder"):
+            target_encoder_params = sum(
+                p.numel() for p in self.jepa.target_encoder.parameters()
+            )
 
         active_params = total_params - inactive_moe_params - target_encoder_params
 

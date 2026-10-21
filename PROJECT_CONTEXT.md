@@ -82,12 +82,16 @@ Lamb/
 ├── verify_phase7.py            # Phase 7 Live Playwright browser environment & action verification test
 ├── verify_phase8.py            # Phase 8 Standardized evaluation benchmark harness test
 ├── verify_phase9.py            # Phase 9 Dynamic procedural synthesis & scaled multi-task GRPO test
+├── verify_phase10.py           # Phase 10 Scientific 4-way backbone ablation verification test
+├── run_ablation.py             # Phase 10 CLI 4-way ablation benchmark runner & artifact generator
 ├── eval_benchmarks.py          # Phase 8 CLI benchmark evaluation & comparative runner
 ├── BENCHMARK_REPORT.md         # Phase 8 Automated comparative benchmark report
+├── ABLATION_REPORT.md          # Phase 10 Automated scientific ablation report & LaTeX artifacts
 ├── openspec/                   # Spec-driven development framework & archived changes
 └── jed_m2/
     ├── __init__.py             # Exports public modules
     ├── config.py               # Global JEDM2Config dataclass
+    ├── baselines.py            # Phase 10 StandardMHA, DenseSwiGLUFFN, and calibrated baseline factories
     ├── vision.py               # Phase 6D Lightweight pure PyTorch visual patch encoder
     ├── mla.py                  # Multi-Head Latent Attention + RoPE + RMSNorm (Sequence + Step)
     ├── moe.py                  # Sparse Top-2 MoE with SwiGLU & Aux Loss
@@ -331,6 +335,37 @@ Lamb/
   - Verified multi-factor reward shaping arithmetic on test trajectories.
   - Verified curriculum progression threshold advancement and exploration decay.
   - Peak GPU VRAM allocated: **625.58 MB** (0.61 GB / 10.18% utilization), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit) on NVIDIA GeForce RTX 5060 Laptop GPU in `bfloat16`.
+
+### [DONE] Phase 10: Scientific 4-Way Backbone Ablation Study Suite
+- [x] Architectural Baseline Reference Modules (`jed_m2/baselines.py`):
+  - `StandardMHA`: Standard Multi-Head Attention with decoupled Q/K/V linear projections, rotary positional embeddings (RoPE), standard uncompressed per-head KV-caching, and scaled dot-product attention.
+  - `DenseSwiGLUFFN`: Dense gated SwiGLU feed-forward network matching standard dense LLM architectures.
+  - Parameter-matched model factory functions: `create_baseline_a`, `create_baseline_b`, `create_baseline_c`, `create_baseline_d`.
+- [x] Configurable Architectural Toggles (`jed_m2/config.py`):
+  - `attn_type: Literal["mla", "mha"]`
+  - `ffn_type: Literal["moe", "dense"]`
+  - `use_mamba: bool`
+  - `use_jepa: bool`
+  - `dense_intermediate_dim: int`
+- [x] Modular Backbone Integration (`jed_m2/model.py`):
+  - Updated `JEDM2Block` to conditionally execute Mamba SSM, MLA vs. Standard MHA, and Sparse Top-2 MoE vs. Dense SwiGLU FFN in both sequence forward and recurrent `step(...)` modes.
+  - Updated `JEDM2Model` with optional JEPA world model, variable layer depths, and accurate active parameter counting in `count_parameters()`.
+- [x] Four Parameter-Matched Calibrated Model Baselines (~50.0M Total Params):
+  * Baseline A (Pure Transformer): 4 layers, Standard MHA + Dense SwiGLU FFN (50.64M total params, 50.64M active per token).
+  * Baseline B (Hybrid Attention-SSM): 3 layers, Mamba SSM + MLA + Dense SwiGLU FFN (50.30M total params, 50.30M active per token).
+  * Baseline C (JED-M2 without JEPA): 3 layers, Mamba SSM + MLA + Sparse Top-2 MoE (50.90M total params, 22.59M active per token).
+  * Baseline D (Full JED-M2 with Connected JEPA): 3 layers, Mamba SSM + MLA + Sparse MoE + Connected JEPA (53.04M total params, 24.07M active per token).
+- [x] Ablation Benchmark Harness CLI (`run_ablation.py`):
+  - Experiment 1 (Recurrent Memory Scaling): Profiled allocated VRAM and KV cache footprint across 16, 32, 64, 128 turns. Baseline A showed linear $O(N)$ growth (128 KB to 1024 KB), while JED-M2 MLA compressed KV cache to 15 KB - 120 KB (88.3% memory reduction).
+  - Experiment 2 (Inference Step Latency): Benchmarked single-step recurrent rollout in native `bfloat16` on NVIDIA RTX 5060 Laptop GPU: Baseline A (6.29 ms mean), Baseline B (8.90 ms mean), Baseline C (10.64 ms mean), Baseline D (12.77 ms mean).
+  - Experiment 3 (Controlled Multi-Task Convergence): Trained all 4 baselines on identical procedural batches for 300 steps under identical seeds (`seed=42`). All baselines converged stably to 100.0% action primitive accuracy and low coordinate MAE (< 0.17).
+  - Experiment 4 (Paper Artifacts Export): Generated `ABLATION_REPORT.md` with markdown comparison tables, 7-bit ASCII scaling curves, and publication-ready LaTeX `tabular` snippets.
+- [x] Standalone Verification Script (`verify_phase10.py`):
+  - Verified parameter parity across all 4 baselines within +/- 6.5% of 50.0M budget.
+  - Verified forward and backward gradient integrity (zero NaNs/Infs across all trainable parameters) and JEPA target encoder gradient isolation (`grad is None`).
+  - Verified recurrent step KV cache scaling ($8.00\times$ linear growth for MHA, $88.3\%$ compression for MLA).
+  - Verified inference step latency (< 50 ms/step threshold).
+  - Peak GPU VRAM allocated: **1240.39 MB** (1.21 GB / 20.19% utilization), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit) on NVIDIA GeForce RTX 5060 Laptop GPU in `bfloat16`.
 
 ---
 

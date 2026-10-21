@@ -4,6 +4,7 @@ Calibrated for an ~45M parameter budget Large Action Model (LAM).
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass
@@ -46,6 +47,14 @@ class JEDM2Config:
 
     # Backbone Stack parameters
     num_layers: int = 3  # Stacked JEDM2Block recurrent layers
+
+    # Architectural Baseline & Ablation Toggles (Phase 10)
+    attn_type: Literal["mla", "mha"] = "mla"  # "mla" (Multi-Head Latent Attention) or "mha" (Standard MHA)
+    ffn_type: Literal["moe", "dense"] = "moe"  # "moe" (Sparse Top-2 MoE) or "dense" (Dense SwiGLU FFN)
+    use_mamba: bool = True  # Enable/disable Mamba Selective State Space Model recurrence
+    use_jepa: bool = True  # Enable/disable JEPA Latent World Model
+    dense_intermediate_dim: int = 1024  # Intermediate hidden dim for Dense SwiGLU FFN
+    mha_head_dim: int = 64  # Per-head dimension for Standard MHA (default: hidden_dim // num_heads = 64)
 
     # Dual-System Action Head parameters
     num_action_types: int = 6  # CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH
