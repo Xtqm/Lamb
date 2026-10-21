@@ -7,6 +7,10 @@ from jed_m2.agent import (
     JEDM2Agent,
     TurnRecord,
 )
+from jed_m2.browser import (
+    PlaywrightBrowserEnvironment,
+    PlaywrightStepResult,
+)
 from jed_m2.config import JEDM2Config
 from jed_m2.dataset import (
     AgentTrajectoryDataset,
@@ -117,6 +121,8 @@ __all__ = [
     "calculate_grpo_loss",
     "compute_token_log_probs",
     "WebOSEnvironment",
+    "PlaywrightBrowserEnvironment",
+    "PlaywrightStepResult",
     "EnvironmentState",
     "StepResult",
     "ScenarioDefinition",

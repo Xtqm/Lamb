@@ -135,13 +135,19 @@ class JEDM2Agent:
         self.history.clear()
         self.turn_count = 0
 
-    def _feed_single_token(self, token_id: int) -> Tuple[torch.Tensor, ActionOutput]:
+    def _feed_single_token(
+        self,
+        token_id: int,
+        visual_tokens: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, ActionOutput]:
         """
         Feeds a single token ID through the model's recurrent step method.
         Preserves and updates recurrent states and position counter.
+        Supports visual patch tokens for grounded action decoding.
 
         Args:
             token_id: Integer token ID.
+            visual_tokens: Optional visual patch tokens [1, N_v, hidden_dim].
 
         Returns:
             Tuple of:
@@ -154,16 +160,22 @@ class JEDM2Agent:
                 token_tensor,
                 states=self.recurrent_states,
                 pos=self.current_pos,
+                visual_tokens=visual_tokens,
             )
         self.current_pos += 1
         return lm_logits, action_output
 
-    def _feed_token_sequence(self, token_ids: List[int]) -> Tuple[torch.Tensor, ActionOutput]:
+    def _feed_token_sequence(
+        self,
+        token_ids: List[int],
+        visual_tokens: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, ActionOutput]:
         """
         Sequentially feeds a sequence of token IDs through the recurrent rollout.
 
         Args:
             token_ids: List of integer token IDs.
+            visual_tokens: Optional visual patch tokens [1, N_v, hidden_dim].
 
         Returns:
             Final step's (lm_logits, action_output).
@@ -174,13 +186,14 @@ class JEDM2Agent:
         last_lm_logits = None
         last_action_out = None
         for tok in token_ids:
-            last_lm_logits, last_action_out = self._feed_single_token(tok)
+            last_lm_logits, last_action_out = self._feed_single_token(tok, visual_tokens=visual_tokens)
         return last_lm_logits, last_action_out
 
     def act(
         self,
         obs_text: str,
         obs_features: Optional[torch.Tensor] = None,
+        screenshot: Optional[Union[torch.Tensor, Any]] = None,
     ) -> AgentStepOutput:
         """
         Executes a dual-system decision step given an environment observation:
@@ -188,15 +201,39 @@ class JEDM2Agent:
         2. System 2 (Latent Reasoning): Autoregressively generates thought tokens
            until ActionGate exceeds the commitment threshold or maximum length is reached.
         3. System 1 (Action Decoding): Emits discrete primitive, normalized (x, y) coordinates,
-           and argument payload.
+           and argument payload, optionally grounded in visual screenshot patches.
 
         Args:
             obs_text: Raw observation text from environment state.
             obs_features: Optional dense observation embedding for JEPA world model.
+            screenshot: Optional [3, H, W] RGB tensor or PIL Image for visual grounding.
 
         Returns:
             AgentStepOutput containing rationale, action primitive, coordinates, and argument.
         """
+        # ======================================================================
+        # 0. Visual Screenshot Encoding (Multimodal Grounding)
+        # ======================================================================
+        visual_tokens: Optional[torch.Tensor] = None
+        if screenshot is not None and hasattr(self.model, "patch_encoder") and self.model.patch_encoder is not None:
+            if isinstance(screenshot, torch.Tensor):
+                img_t = screenshot
+                if img_t.ndim == 3:
+                    # [3, H, W] -> [1, 3, H, W]
+                    img_t = img_t.unsqueeze(0)
+                img_t = img_t.to(device=self.device, dtype=torch.float32)
+                with torch.no_grad():
+                    # [1, 3, H, W] -> [1, N_v, hidden_dim]
+                    visual_tokens = self.model.patch_encoder(img_t)
+            elif hasattr(screenshot, "size"):  # PIL Image
+                import numpy as np
+                img_np = np.array(screenshot.convert("RGB"), dtype=np.float32) / 255.0
+                img_t = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(
+                    device=self.device, dtype=torch.float32
+                )
+                with torch.no_grad():
+                    visual_tokens = self.model.patch_encoder(img_t)
+
         # ======================================================================
         # 1. Observation Prompt Encoding & Ingestion
         # ======================================================================
@@ -237,6 +274,16 @@ class JEDM2Agent:
         # ======================================================================
         # 3. System 1: Action Primitive, Coordinate, and Argument Decoding
         # ======================================================================
+        # Advance through </thought> (if needed) and step into <action> trigger token
+        # where the System 1 action heads were trained to emit decisions
+        if not thought_tokens or thought_tokens[-1] != end_thought_id:
+            lm_logits, action_output = self._feed_single_token(end_thought_id)
+
+        action_token_id = self.tokenizer.special_tokens["<action>"]
+        # Ground coordinate head in visual patch tokens if available
+        lm_logits, action_output = self._feed_single_token(action_token_id, visual_tokens=visual_tokens)
+        gate_prob = float(torch.sigmoid(action_output.gate_logits).item())
+
         # Argmax discrete primitive
         action_type_id = int(torch.argmax(action_output.action_type_logits, dim=-1).item())
         action_type = ActionType(action_type_id)
@@ -260,7 +307,7 @@ class JEDM2Agent:
             thought_text = cleaned_thought
 
         # Advance recurrent trajectory with closing tokens for next turn context
-        close_prompt = f"</thought> <action>"
+        close_prompt = f"{action_type.name} </action>"
         close_tokens = self.tokenizer.encode(close_prompt)
         self._feed_token_sequence(close_tokens)
 
@@ -280,24 +327,30 @@ class JEDM2Agent:
 
     def step_environment(
         self,
-        env: WebOSEnvironment,
+        env: Union[WebOSEnvironment, Any],
     ) -> Tuple[AgentStepOutput, StepResult]:
         """
-        Executes a single interactive turn against a WebOSEnvironment sandbox:
-        1. Obtains observation from environment.
-        2. Emits dual-system decision (rationale + action).
+        Executes a single interactive turn against a WebOSEnvironment or PlaywrightBrowserEnvironment:
+        1. Obtains observation text, features, and optional screenshot from environment.
+        2. Emits dual-system decision (rationale + visually-grounded action).
         3. Dispatches action into environment.
         4. Logs turn into history and returns (agent_output, step_result).
         """
+        screenshot: Optional[torch.Tensor] = None
         if env.current_state is None:
             init_res = env.reset()
             obs_text = init_res.obs_text
             obs_features = init_res.obs_features
+            screenshot = getattr(init_res, "screenshot", None)
+            if screenshot is None and isinstance(init_res.info, dict):
+                screenshot = init_res.info.get("screenshot", None)
         else:
             obs_text = env._format_observation_text()
             obs_features = env._generate_obs_features()
+            if hasattr(env, "capture_screenshot"):
+                screenshot = env.capture_screenshot(as_tensor=True)
 
-        agent_output = self.act(obs_text=obs_text, obs_features=obs_features)
+        agent_output = self.act(obs_text=obs_text, obs_features=obs_features, screenshot=screenshot)
 
         step_res = env.step(
             action_type=agent_output.action_type,
@@ -322,11 +375,12 @@ class JEDM2Agent:
 
     def run_episode(
         self,
-        env: WebOSEnvironment,
+        env: Union[WebOSEnvironment, Any],
         max_turns: int = 10,
     ) -> List[TurnRecord]:
         """
         Executes a complete closed-loop episode in the environment until termination or max_turns.
+        Supports both simulated WebOSEnvironment and live PlaywrightBrowserEnvironment.
         """
         self.reset()
         env.reset()

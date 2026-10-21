@@ -239,6 +239,32 @@ class TrajectoryRolloutSampler:
             # ------------------------------------------------------------------
             # 3. System 1: Action Primitive, Coordinates & Argument Decoding
             # ------------------------------------------------------------------
+            # Advance through </thought> (if needed) and step into <action> trigger token
+            # where the System 1 action heads were trained to emit decisions
+            if not thought_tokens or thought_tokens[-1] != end_thought_id:
+                token_tensor = torch.tensor([end_thought_id], device=self.device, dtype=torch.long)
+                with torch.no_grad():
+                    lm_logits, action_output, recurrent_states = self.model.step(
+                        token_tensor, states=recurrent_states, pos=current_pos
+                    )
+                current_pos += 1
+                all_tokens.append(end_thought_id)
+                all_mask.append(False)
+                turn_tokens.append(end_thought_id)
+                turn_mask.append(False)
+
+            action_token_id = self.tokenizer.special_tokens["<action>"]
+            token_tensor = torch.tensor([action_token_id], device=self.device, dtype=torch.long)
+            with torch.no_grad():
+                lm_logits, action_output, recurrent_states = self.model.step(
+                    token_tensor, states=recurrent_states, pos=current_pos
+                )
+            current_pos += 1
+            all_tokens.append(action_token_id)
+            all_mask.append(False)
+            turn_tokens.append(action_token_id)
+            turn_mask.append(False)
+
             if temperature > 0.0:
                 act_probs = F.softmax(action_output.action_type_logits / temperature, dim=-1)
                 action_type_id = int(torch.multinomial(act_probs, num_samples=1).item())
@@ -275,24 +301,6 @@ class TrajectoryRolloutSampler:
                 argument=arg_str,
             )
             step_rewards.append(step_res.reward)
-
-            # Advance recurrent trajectory with closing tokens and emitted action
-            close_prompt = f"</thought> <action>"
-            close_tokens = self.tokenizer.encode(close_prompt)
-            all_tokens.extend(close_tokens)
-            all_mask.extend([False] * len(close_tokens))
-            turn_tokens.extend(close_tokens)
-            turn_mask.extend([False] * len(close_tokens))
-
-            for tok in close_tokens:
-                token_tensor = torch.tensor([tok], device=self.device, dtype=torch.long)
-                with torch.no_grad():
-                    lm_logits, action_output, recurrent_states = self.model.step(
-                        token_tensor,
-                        states=recurrent_states,
-                        pos=current_pos,
-                    )
-                current_pos += 1
 
             # Action primitive token (trainable)
             act_tok = self.tokenizer.encode(action_type.name)[0]

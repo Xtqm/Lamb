@@ -79,6 +79,7 @@ Lamb/
 ├── verify_phase6b.py           # Phase 6B RL rollouts, DPO/GRPO training & memory ceiling test
 ├── verify_phase6c.py           # Phase 6C SFT convergence & baseline checkpoint verification test
 ├── verify_phase6d.py           # Phase 6D Multimodal visual grounding & VRAM ceiling test
+├── verify_phase7.py            # Phase 7 Live Playwright browser environment & action verification test
 ├── openspec/                   # Spec-driven development framework & archived changes
 └── jed_m2/
     ├── __init__.py             # Exports public modules
@@ -96,7 +97,8 @@ Lamb/
     ├── rl.py                   # Direct Policy Optimization (DPO) & Group Relative Policy Optimization (GRPO)
     ├── rl_pipeline.py          # Phase 6B Interactive rollout sampler, group advantages & preference pairs
     ├── environment.py          # Phase 6A Simulated Web/OS sandbox environment state machine
-    └── agent.py                # Phase 6A Interactive runtime engine with O(1) recurrent rollout
+    ├── browser.py              # Phase 7 Live browser automation environment via Playwright
+    └── agent.py                # Phase 6A/7 Interactive runtime engine with visual grounding & recurrent rollout
 ```
 
 ---
@@ -250,6 +252,27 @@ Lamb/
   - Verified multimodal composite multi-task loss and end-to-end backpropagation with clean gradients (173 parameter tensors, zero NaNs/Infs) and strict JEPA target encoder gradient isolation (`grad is None`).
   - Verified multimodal recurrent step rollout ($O(1)$ state buffer persistence).
   - Peak GPU VRAM allocated: **1457.76 MB** (1.42 GB / 23.73% utilization), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit) on NVIDIA GeForce RTX 5060 Laptop GPU in `bfloat16`.
+
+### [DONE] Phase 7: Live Browser Automation Environment (Playwright)
+- [x] Live Playwright browser environment (`jed_m2/browser.py`):
+  - `PlaywrightBrowserEnvironment`: Automates headless/headed Chromium browser to navigate real websites with configurable viewports (1280x800) and timeouts.
+  - DOM accessibility trees and interactive element extraction: Extracts live accessibility trees (`page.aria_snapshot()`) and evaluates client bounding boxes for visible interactive elements (`button`, `input`, `a`, `select`, `textarea`), normalized to $[0, 1] \times [0, 1]$.
+  - Viewport screenshot capture: Captures real viewport screenshots as $[3, H, W]$ normalized RGB float tensors in $[0.0, 1.0]$ or PIL images.
+  - Native browser interaction primitives: Dispatches CLICK at denormalized pixel coordinates via `page.mouse.click`, TYPE via `page.keyboard.type`, SCROLL via `page.mouse.wheel`, NAVIGATE via `page.goto`, and FINISH to terminate episodes.
+  - Resilient error handling: Intercepts network timeouts, 404s, and unresolvable domains without raising uncaught exceptions, providing structured error feedback in observations.
+- [x] Multimodal agent runtime extension (`jed_m2/agent.py`):
+  - Extends `JEDM2Agent` to synchronize live screenshot captures with `VisionPatchEncoder`, feeding visual patch tokens into `model.step(..., visual_tokens=visual_tokens)` to ground `CoordinateHead` predictions in live web pixels.
+  - Executes multi-turn browsing tasks with $O(1)$ constant-memory recurrence across both simulated (`WebOSEnvironment`) and live (`PlaywrightBrowserEnvironment`) digital environments.
+- [x] Interactive terminal CLI updates (`interactive_agent.py`):
+  - Adds `--browser {simulated,playwright}` flag, starting `--url` parameter, and `--headed` option.
+  - Live ASCII visual screen canvas and action telemetry displaying real web element layouts and pointer target coordinates.
+- [x] Implement and execute `verify_phase7.py`:
+  - Verified local HTTP test server orchestration and page navigation (438.0 ms launch + nav latency).
+  - Verified screenshot tensor capture ($[3, 224, 224]$ RGB float in $[0.12, 1.00]$) and DOM element extraction (inputs, buttons, links with normalized bounding boxes).
+  - Verified native browser interaction primitives: CLICK, TYPE, SCROLL, NAVIGATE, and FINISH all executing successfully.
+  - Verified resilient error handling and graceful recovery on connection failures (`ERR_CONNECTION_REFUSED`).
+  - Verified closed-loop multimodal agent rollout with visual grounding, rationale generation, coordinate prediction, and zero NaNs/Infs.
+  - Peak GPU VRAM allocated: **139.45 MB** (0.14 GB), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit) on NVIDIA GeForce RTX 5060 Laptop GPU in `bfloat16`.
 
 ---
 

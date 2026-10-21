@@ -68,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None, help="Force execution device ('cuda' or 'cpu')")
 
     # Checkpoint & Logging
+    parser.add_argument("--model_path", type=str, default=None, help="Optional initial model checkpoint (.pt) to seed RL policy")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints_rl", help="Directory for saved RL checkpoints")
     parser.add_argument("--save_interval", type=int, default=25, help="Iteration interval to save checkpoints")
     parser.add_argument("--log_interval", type=int, default=1, help="Iteration interval to log telemetry")
@@ -137,6 +138,13 @@ def main() -> None:
 
     # Active trainable policy
     model = JEDM2Model(model_config).to(device=device, dtype=dtype)
+    if args.model_path:
+        print(f"[Init] Loading policy weights from: {args.model_path}")
+        ckpt = torch.load(args.model_path, map_location=device)
+        state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        print(f"[Init] Policy loaded successfully (missing keys: {len(missing)}, unexpected: {len(unexpected)})")
+
     if not args.no_checkpointing:
         model.gradient_checkpointing_enable()
 

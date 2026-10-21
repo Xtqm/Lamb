@@ -15,6 +15,7 @@ from typing import List, Optional, Tuple
 import torch
 
 from jed_m2.agent import JEDM2Agent
+from jed_m2.browser import PlaywrightBrowserEnvironment
 from jed_m2.config import JEDM2Config
 from jed_m2.environment import UIElement, WebOSEnvironment
 from jed_m2.heads import ActionType
@@ -141,16 +142,24 @@ def run_interactive_session(
     thought_tokens: int = 16,
     threshold: float = 0.5,
     checkpoint_path: Optional[str] = None,
+    browser_type: str = "simulated",
+    url: Optional[str] = None,
+    headed: bool = False,
 ) -> None:
     """
     Runs an interactive terminal agent session with visual canvas and step inspection.
+    Supports simulated WebOSEnvironment and live PlaywrightBrowserEnvironment.
     """
     dev = torch.device(device if (device == "cuda" and torch.cuda.is_available()) else "cpu")
     print(f"\n======================================================================")
     print(f"  JED-M2 Large Action Model (LAM) - Interactive Terminal Runtime")
     print(f"======================================================================")
     print(f"Device: {dev} | Precision: {dtype}")
-    print(f"Scenario: {scenario_id} | Mode: {mode.upper()}")
+    print(f"Environment: {browser_type.upper()} | Mode: {mode.upper()}")
+    if browser_type == "playwright":
+        print(f"Playwright Headed: {headed} | Viewport: 1280x800")
+    else:
+        print(f"Scenario: {scenario_id}")
     print(f"----------------------------------------------------------------------")
 
     # Initialize model
@@ -160,14 +169,26 @@ def run_interactive_session(
     if checkpoint_path is not None:
         print(f"Loading weights from: {checkpoint_path}...")
         ckpt = torch.load(checkpoint_path, map_location=dev)
-        if "model_state_dict" in ckpt:
-            model.load_state_dict(ckpt["model_state_dict"])
-        else:
-            model.load_state_dict(ckpt)
-        print("Model weights successfully loaded.")
+        state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        print(f"Model weights successfully loaded (missing: {len(missing)}, unexpected: {len(unexpected)}).")
 
     # Initialize environment and agent
-    env = WebOSEnvironment(config=config, scenario_id=scenario_id, device=dev, dtype=dtype)
+    if browser_type == "playwright":
+        env = PlaywrightBrowserEnvironment(
+            config=config,
+            headless=(not headed),
+            device=dev,
+            dtype=dtype,
+        )
+        start_url = url if url else "https://en.wikipedia.org/wiki/Main_Page"
+        goal_text = custom_goal if custom_goal else "Explore page and interact with elements"
+        init_res = env.reset(url=start_url, goal=goal_text)
+    else:
+        env = WebOSEnvironment(config=config, scenario_id=scenario_id, device=dev, dtype=dtype)
+        goal_text = custom_goal if custom_goal else env.active_scenario.goal
+        init_res = env.reset(scenario_id=scenario_id, custom_goal=custom_goal)
+
     agent = JEDM2Agent(
         model=model,
         config=config,
@@ -177,76 +198,81 @@ def run_interactive_session(
         action_gate_threshold=threshold,
     )
 
-    init_res = env.reset(scenario_id=scenario_id, custom_goal=custom_goal)
     canvas = ASCIIScreenCanvas(width=72, height=18)
 
-    print(f"Goal: {env.active_scenario.goal}")
+    print(f"Goal: {goal_text}")
     print(f"Initial Page: {env.current_state.url} ({env.current_state.title})")
     print(f"\n--- Initial Screen Canvas ---")
     print(canvas.render(env.current_state.elements))
 
-    for step_num in range(1, max_steps + 1):
-        print(f"\n======================================================================")
-        print(f"Turn {step_num} / {max_steps} | URL: {env.current_state.url}")
-        print(f"======================================================================")
-
-        # Agent decision
-        obs_text = env._format_observation_text()
-        obs_features = env._generate_obs_features()
-        agent_out = agent.act(obs_text=obs_text, obs_features=obs_features)
-
-        # Print System 2 Latent Reasoning
-        print(f"\n[System 2 Rationale]")
-        print(f"  Thought: \"{agent_out.thought}\"")
-        print(f"  Thought Tokens Generated: {agent_out.num_thought_tokens}")
-        print(f"  Action Gate Probability:  {agent_out.gate_prob:.4f} (Threshold: {threshold})")
-
-        # Print System 1 Action Decision
-        cx, cy = agent_out.coordinates
-        print(f"\n[System 1 Action Primitive]")
-        print(f"  Action Type:  {agent_out.action_name}")
-        print(f"  Coordinates:  ({cx:.3f}, {cy:.3f})")
-        print(f"  Argument:     \"{agent_out.argument}\"")
-
-        # Render screen canvas with pointer target
-        print(f"\n[Visual Screen Canvas (Pointer Target: [X])]")
-        print(canvas.render(env.current_state.elements, cursor_coords=agent_out.coordinates))
-
-        # Dispatch action to environment
-        step_res = env.step(
-            action_type=agent_out.action_type,
-            coordinates=agent_out.coordinates,
-            argument=agent_out.argument,
-        )
-
-        # Print Environment Transition Feedback
-        hit_name = step_res.info.get("hit_element", "None (Background)")
-        print(f"\n[Environment Feedback]")
-        print(f"  Hit Element:        {hit_name}")
-        print(f"  Step Reward:        {step_res.reward:+.3f}")
-        print(f"  Cumulative Reward:  {step_res.info.get('cumulative_reward', 0.0):+.3f}")
-        print(f"  Goal Satisfied:     {step_res.info.get('goal_satisfied', False)}")
-        print(f"  Episode Terminated: {step_res.done}")
-
-        if step_res.done:
+    try:
+        for step_num in range(1, max_steps + 1):
             print(f"\n======================================================================")
-            if step_res.info.get("goal_satisfied", False):
-                print(f"  [SUCCESS] Task Goal Completed Successfully!")
-            else:
-                print(f"  [TERMINATED] Episode terminated before goal completion.")
-            print(f"  Total Turns: {step_num} | Cumulative Reward: {env.current_state.cumulative_reward:+.3f}")
-            print(f"======================================================================\n")
-            break
+            print(f"Turn {step_num} / {max_steps} | URL: {env.current_state.url}")
+            print(f"======================================================================")
 
-        if mode == "step" and step_num < max_steps:
-            try:
-                user_in = input("\nPress [Enter] to continue to next turn (or 'q' to quit): ").strip()
-                if user_in.lower() == "q":
-                    print("Session aborted by user.")
-                    break
-            except (EOFError, KeyboardInterrupt):
-                print("\nSession interrupted.")
+            # Agent decision
+            obs_text = env._format_observation_text()
+            obs_features = env._generate_obs_features()
+            screenshot = env.capture_screenshot(as_tensor=True) if hasattr(env, "capture_screenshot") else None
+            agent_out = agent.act(obs_text=obs_text, obs_features=obs_features, screenshot=screenshot)
+
+            # Print System 2 Latent Reasoning
+            print(f"\n[System 2 Rationale]")
+            print(f"  Thought: \"{agent_out.thought}\"")
+            print(f"  Thought Tokens Generated: {agent_out.num_thought_tokens}")
+            print(f"  Action Gate Probability:  {agent_out.gate_prob:.4f} (Threshold: {threshold})")
+
+            # Print System 1 Action Decision
+            cx, cy = agent_out.coordinates
+            print(f"\n[System 1 Action Primitive]")
+            print(f"  Action Type:  {agent_out.action_name}")
+            print(f"  Coordinates:  ({cx:.3f}, {cy:.3f})")
+            print(f"  Argument:     \"{agent_out.argument}\"")
+
+            # Render screen canvas with pointer target
+            print(f"\n[Visual Screen Canvas (Pointer Target: [X])]")
+            print(canvas.render(env.current_state.elements, cursor_coords=agent_out.coordinates))
+
+            # Dispatch action to environment
+            step_res = env.step(
+                action_type=agent_out.action_type,
+                coordinates=agent_out.coordinates,
+                argument=agent_out.argument,
+            )
+
+            # Print Environment Transition Feedback
+            hit_name = step_res.info.get("hit_element", "None (Background)")
+            print(f"\n[Environment Feedback]")
+            print(f"  Hit Element:        {hit_name}")
+            print(f"  Step Reward:        {step_res.reward:+.3f}")
+            print(f"  Cumulative Reward:  {step_res.info.get('cumulative_reward', 0.0):+.3f}")
+            print(f"  Goal Satisfied:     {step_res.info.get('goal_satisfied', False)}")
+            print(f"  Episode Terminated: {step_res.done}")
+
+            if step_res.done:
+                print(f"\n======================================================================")
+                if step_res.info.get("goal_satisfied", False):
+                    print(f"  [SUCCESS] Task Goal Completed Successfully!")
+                else:
+                    print(f"  [TERMINATED] Episode terminated before goal completion.")
+                print(f"  Total Turns: {step_num} | Cumulative Reward: {env.current_state.cumulative_reward:+.3f}")
+                print(f"======================================================================\n")
                 break
+
+            if mode == "step" and step_num < max_steps:
+                try:
+                    user_in = input("\nPress [Enter] to continue to next turn (or 'q' to quit): ").strip()
+                    if user_in.lower() == "q":
+                        print("Session aborted by user.")
+                        break
+                except (EOFError, KeyboardInterrupt):
+                    print("\nSession interrupted.")
+                    break
+
+    finally:
+        if hasattr(env, "close"):
+            env.close()
 
     print("Session concluded.\n")
 
@@ -254,11 +280,29 @@ def run_interactive_session(
 def main() -> None:
     parser = argparse.ArgumentParser(description="JED-M2 Interactive Agent CLI Interface")
     parser.add_argument(
+        "--browser",
+        type=str,
+        default="simulated",
+        choices=["simulated", "playwright"],
+        help="Browser environment type: simulated (WebOSEnvironment sandbox) or playwright (live Chromium browser)",
+    )
+    parser.add_argument(
+        "--url",
+        type=str,
+        default=None,
+        help="Initial target URL for live Playwright browser session",
+    )
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Launch Playwright browser in headed mode (visible window)",
+    )
+    parser.add_argument(
         "--scenario",
         type=str,
         default="ecommerce",
         choices=["ecommerce", "travel", "os_admin"],
-        help="Benchmark scenario domain to execute",
+        help="Benchmark scenario domain to execute (for simulated environment)",
     )
     parser.add_argument(
         "--goal",
@@ -315,6 +359,9 @@ def main() -> None:
         thought_tokens=args.thought_tokens,
         threshold=args.threshold,
         checkpoint_path=args.model_path,
+        browser_type=args.browser,
+        url=args.url,
+        headed=args.headed,
     )
 
 
