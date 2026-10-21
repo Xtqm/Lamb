@@ -216,11 +216,11 @@ def test_agent_runtime(device: torch.device, dtype: torch.dtype) -> None:
         assert ssm_st.shape == (1, config.mamba_inner_dim, config.mamba_d_state)
         assert conv_st.shape == (1, config.mamba_inner_dim, config.mamba_d_conv)
         assert kv_c is not None
-        k_cache, v_cache = kv_c
-        assert k_cache.ndim == 4 and v_cache.ndim == 4
+        c_kv, k_rope = kv_c
+        assert c_kv.ndim == 3 and k_rope.ndim == 4
         assert not torch.isnan(ssm_st).any(), f"NaN in layer {l_idx} ssm_state"
         assert not torch.isnan(conv_st).any(), f"NaN in layer {l_idx} conv_state"
-        assert not torch.isnan(k_cache).any(), f"NaN in layer {l_idx} k_cache"
+        assert not torch.isnan(c_kv).any(), f"NaN in layer {l_idx} c_kv"
     print("  [Pass] Layer-wise Mamba SSM and MLA KV-cache state integrity verified.")
 
     # Reset agent and verify state flushing

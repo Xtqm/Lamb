@@ -247,18 +247,27 @@ class MultiHeadLatentAttention(nn.Module):
         pos: int = 0,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        Recurrent single-token step for Multi-Head Latent Attention with dynamic KV caching.
+        Recurrent single-token step for Multi-Head Latent Attention with True Latent Caching
+        and Matrix Absorption.
+        
+        DeepSeek MLA Optimization:
+        - Stores only compressed latent state c_KV [B, S, d_c] and shared RoPE key K_rope [B, S, 1, d_R]
+          in the KV cache (160 floats/token vs 1024 floats/token in standard multi-head caching).
+        - Absorb W_UK into W_Q: Q_absorbed_h = Q_nope_h @ W_UK_h, enabling direct inner product
+          with the compressed latent vector c_KV without expanding multi-head keys into memory.
+        - Computes values via associative projection: (Attn @ c_KV) @ W_UV^T.
 
         Args:
             x_t: Input tensor for current timestep, shape [B, D] or [B, 1, D].
-            kv_cache: Optional tuple of (cached_k, cached_v), each of shape
-                      [B, num_heads, past_len, head_dim].
+            kv_cache: Optional tuple of (cached_c_kv, cached_k_rope).
+                      cached_c_kv shape: [B, past_len, kv_lora_rank]
+                      cached_k_rope shape: [B, past_len, 1, qk_rope_head_dim]
             pos: Current sequence position integer (0-indexed).
 
         Returns:
             Tuple of:
             - out_t: Output tensor for current timestep, shape matches x_t [B, D] or [B, 1, D].
-            - next_kv_cache: Updated (k, v) cache tuple.
+            - next_kv_cache: Updated (c_kv_all, k_rope_all) latent cache tuple.
         """
         squeeze_needed = False
         if x_t.ndim == 2:
@@ -267,57 +276,87 @@ class MultiHeadLatentAttention(nn.Module):
 
         b_sz, seq_len, _ = x_t.shape
 
-        # 1. Query projection & compression
+        # 1. Query projection & compression: [B, 1, q_lora_rank]
         c_q = self.w_dq(x_t)
         c_q = self.q_norm(c_q)
 
-        q_nope = self.w_uq(c_q).view(b_sz, seq_len, self.num_heads, self.qk_nope_head_dim)
-        q_rope = self.w_qr(c_q).view(b_sz, seq_len, self.num_heads, self.qk_rope_head_dim)
-        q_rope = self.rotary_emb(q_rope, seq_len=1, start_pos=pos)
-        q = torch.cat([q_nope, q_rope], dim=-1)  # [B, 1, num_heads, qk_head_dim]
+        # Q_nope: [B, num_heads, 1, qk_nope_head_dim]
+        q_nope = (
+            self.w_uq(c_q)
+            .view(b_sz, seq_len, self.num_heads, self.qk_nope_head_dim)
+            .transpose(1, 2)
+        )
+        # Q_rope: [B, num_heads, 1, qk_rope_head_dim]
+        q_rope = (
+            self.w_qr(c_q)
+            .view(b_sz, seq_len, self.num_heads, self.qk_rope_head_dim)
+        )
+        q_rope = self.rotary_emb(q_rope, seq_len=1, start_pos=pos).transpose(1, 2)
 
-        # 2. Key-Value projection & compression
+        # Absorb W_UK into Q_nope:
+        # W_UK: [num_heads * qk_nope_head_dim, kv_lora_rank] -> [num_heads, qk_nope_head_dim, kv_lora_rank]
+        w_uk_heads = self.w_uk.weight.view(
+            self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank
+        )
+        # Q_absorbed: [B, num_heads, 1, kv_lora_rank]
+        q_absorbed = torch.matmul(q_nope, w_uk_heads.unsqueeze(0))
+
+        # 2. Key-Value latent projection & RoPE key
+        # c_kv: [B, 1, kv_lora_rank]
         c_kv = self.w_dkv(x_t)
         c_kv = self.kv_norm(c_kv)
 
-        k_nope = self.w_uk(c_kv).view(b_sz, seq_len, self.num_heads, self.qk_nope_head_dim)
+        # Shared RoPE key: [B, 1, 1, qk_rope_head_dim]
         k_rope = self.w_kr(x_t).view(b_sz, seq_len, 1, self.qk_rope_head_dim)
         k_rope = self.rotary_emb(k_rope, seq_len=1, start_pos=pos)
-        k_rope = k_rope.expand(-1, -1, self.num_heads, -1)
-        k_t = torch.cat([k_nope, k_rope], dim=-1)  # [B, 1, num_heads, qk_head_dim]
 
-        v_t = self.w_uv(c_kv).view(
-            b_sz, seq_len, self.num_heads, self.v_head_dim
-        )  # [B, 1, num_heads, v_head_dim]
-
-        # Transpose to [B, num_heads, 1, head_dim]
-        q_t = q.transpose(1, 2)
-        k_t = k_t.transpose(1, 2)
-        v_t = v_t.transpose(1, 2)
-
-        # 3. Update KV-cache
+        # 3. Update True Latent KV-cache
         if kv_cache is None:
-            k_all = k_t
-            v_all = v_t
+            c_kv_all = c_kv
+            k_rope_all = k_rope
         else:
-            k_prev, v_prev = kv_cache
-            k_all = torch.cat([k_prev, k_t], dim=2)
-            v_all = torch.cat([v_prev, v_t], dim=2)
+            c_kv_prev, k_rope_prev = kv_cache
+            c_kv_all = torch.cat([c_kv_prev, c_kv], dim=1)
+            k_rope_all = torch.cat([k_rope_prev, k_rope], dim=1)
 
-        next_kv_cache = (k_all, v_all)
+        next_kv_cache = (c_kv_all, k_rope_all)
 
-        # 4. Attention (attending over all keys in cache up to pos)
-        attn_out = F.scaled_dot_product_attention(
-            q_t,
-            k_all,
-            v_all,
-            is_causal=False,
+        # 4. Attention scores directly over compressed latent cache:
+        # q_absorbed: [B, num_heads, 1, kv_lora_rank]
+        # c_kv_all.unsqueeze(1): [B, 1, S, kv_lora_rank]
+        # scores_nope: [B, num_heads, 1, S]
+        scores_nope = torch.matmul(q_absorbed, c_kv_all.unsqueeze(1).transpose(-1, -2))
+
+        # q_rope: [B, num_heads, 1, qk_rope_head_dim]
+        # k_rope_all.squeeze(2).unsqueeze(1): [B, 1, S, qk_rope_head_dim]
+        # scores_rope: [B, num_heads, 1, S]
+        scores_rope = torch.matmul(
+            q_rope, k_rope_all.squeeze(2).unsqueeze(1).transpose(-1, -2)
         )
-        # attn_out: [B, num_heads, 1, v_head_dim] -> [B, 1, num_heads, v_head_dim]
-        attn_out = attn_out.transpose(1, 2).contiguous()
-        attn_out = attn_out.view(b_sz, seq_len, self.num_heads * self.v_head_dim)
 
-        # 5. Output projection
+        scores = (scores_nope + scores_rope) / (self.qk_head_dim ** 0.5)
+        attn_weights = F.softmax(scores, dim=-1)  # [B, num_heads, 1, S]
+
+        # 5. Value aggregation & projection:
+        # u: [B, num_heads, 1, kv_lora_rank]
+        u = torch.matmul(attn_weights, c_kv_all.unsqueeze(1))
+
+        # Project aggregated latent vectors with W_UV:
+        # W_UV: [num_heads * v_head_dim, kv_lora_rank] -> [num_heads, v_head_dim, kv_lora_rank]
+        w_uv_heads = self.w_uv.weight.view(
+            self.num_heads, self.v_head_dim, self.kv_lora_rank
+        )
+        # v_out: [B, num_heads, 1, v_head_dim]
+        v_out = torch.matmul(u, w_uv_heads.unsqueeze(0).transpose(-1, -2))
+
+        # Combine heads: [B, 1, num_heads * v_head_dim]
+        attn_out = (
+            v_out.transpose(1, 2)
+            .contiguous()
+            .view(b_sz, seq_len, self.num_heads * self.v_head_dim)
+        )
+
+        # 6. Output projection
         out_t = self.w_o(attn_out)
 
         if squeeze_needed:

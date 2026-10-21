@@ -22,7 +22,104 @@ from jed_m2.environment import WebOSEnvironment, get_default_scenarios
 from jed_m2.model import JEDM2Model
 from jed_m2.rl import DPOConfig, DPOTrainer, GRPOConfig, GRPOTrainer
 from jed_m2.rl_pipeline import RolloutTrajectory, TrajectoryRolloutSampler
+from jed_m2.scenario_generator import DynamicScenarioGenerator
 from jed_m2.trainer import JEDM2TrainerConfig, build_optimizer
+
+
+class CurriculumScheduler:
+    """
+    Curriculum Learning Scheduler for Multi-Turn Agent Workflows:
+    - Level 1: 1-step atomic actions (click, type, scroll, navigate), max_turns=1
+    - Level 2: 2-3 step compound workflows (search -> select -> add to cart), max_turns=3
+    - Level 3: 5-8 step long-horizon workflows (full checkout, multi-step form wizard, cloud admin), max_turns=8
+
+    Tracks moving success rate over a rolling window.
+    Advances to next level when moving success rate >= success_threshold (default 0.80).
+    """
+
+    LEVEL_CONFIGS = {
+        1: {"name": "Level 1: Atomic (1-Step)", "max_turns": 1, "complexity": 1},
+        2: {"name": "Level 2: Compound (2-3 Steps)", "max_turns": 3, "complexity": 2},
+        3: {"name": "Level 3: Long-Horizon (5-8 Steps)", "max_turns": 8, "complexity": 3},
+    }
+
+    def __init__(
+        self,
+        initial_level: int = 1,
+        success_threshold: float = 0.80,
+        window_size: int = 10,
+        min_episodes_per_level: int = 8,
+    ):
+        self.current_level = initial_level
+        self.success_threshold = success_threshold
+        self.window_size = window_size
+        self.min_episodes_per_level = min_episodes_per_level
+        self.history: List[float] = []
+        self.episodes_in_current_level = 0
+
+    @property
+    def max_turns(self) -> int:
+        return self.LEVEL_CONFIGS.get(self.current_level, {}).get("max_turns", 8)
+
+    @property
+    def level_name(self) -> str:
+        return self.LEVEL_CONFIGS.get(self.current_level, {}).get("name", f"Level {self.current_level}")
+
+    @property
+    def moving_success_rate(self) -> float:
+        if not self.history:
+            return 0.0
+        return sum(self.history) / len(self.history)
+
+    def record_outcomes(self, successes: List[bool]) -> bool:
+        """
+        Records episode success outcomes and checks for tier promotion.
+        Returns True if curriculum advanced to a higher level.
+        """
+        for s in successes:
+            self.history.append(1.0 if s else 0.0)
+            if len(self.history) > self.window_size:
+                self.history.pop(0)
+            self.episodes_in_current_level += 1
+
+        if (
+            self.current_level < 3
+            and self.episodes_in_current_level >= self.min_episodes_per_level
+            and self.moving_success_rate >= self.success_threshold
+        ):
+            self.current_level += 1
+            self.episodes_in_current_level = 0
+            self.history.clear()
+            return True
+        return False
+
+
+class ExplorationScheduler:
+    """
+    Manages temperature annealing and adaptive entropy bonus scheduling to prevent policy entropy collapse.
+    """
+
+    def __init__(
+        self,
+        initial_temp: float = 0.7,
+        min_temp: float = 0.2,
+        temp_decay: float = 0.99,
+        initial_entropy_coeff: float = 0.01,
+        min_entropy_coeff: float = 0.001,
+        entropy_decay: float = 0.99,
+    ):
+        self.temperature = initial_temp
+        self.min_temp = min_temp
+        self.temp_decay = temp_decay
+        self.entropy_coeff = initial_entropy_coeff
+        self.min_entropy_coeff = min_entropy_coeff
+        self.entropy_decay = entropy_decay
+
+    def step(self) -> Tuple[float, float]:
+        """Steps temperature and entropy coefficient decay."""
+        self.temperature = max(self.min_temp, self.temperature * self.temp_decay)
+        self.entropy_coeff = max(self.min_entropy_coeff, self.entropy_coeff * self.entropy_decay)
+        return self.temperature, self.entropy_coeff
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,6 +146,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip_eps", type=float, default=0.2, help="PPO-style surrogate objective clipping epsilon")
     parser.add_argument("--beta_kl", type=float, default=0.04, help="KL divergence penalty coefficient against reference model")
     parser.add_argument("--temperature", type=float, default=0.7, help="Exploration sampling temperature")
+    parser.add_argument(
+        "--lambda_coord",
+        type=float,
+        default=0.5,
+        help="Weight for continuous spatial coordinate policy gradient ratio",
+    )
+    parser.add_argument(
+        "--entropy_coeff",
+        type=float,
+        default=0.01,
+        help="Token policy entropy regularization bonus weight",
+    )
+    parser.add_argument(
+        "--temp_decay",
+        type=float,
+        default=0.99,
+        help="Multiplicative temperature annealing decay rate per iteration",
+    )
+    parser.add_argument(
+        "--min_temp",
+        type=float,
+        default=0.2,
+        help="Minimum temperature lower bound",
+    )
+    parser.add_argument(
+        "--entropy_decay",
+        type=float,
+        default=0.99,
+        help="Multiplicative entropy bonus coefficient decay rate per iteration",
+    )
+    parser.add_argument(
+        "--min_entropy_coeff",
+        type=float,
+        default=0.001,
+        help="Minimum entropy bonus coefficient lower bound",
+    )
+
+    # Curriculum Learning
+    parser.add_argument(
+        "--curriculum",
+        action="store_true",
+        help="Enable multi-tier curriculum learning (Level 1 -> 2 -> 3) on dynamic procedural environments",
+    )
 
     # DPO Hyperparameters
     parser.add_argument("--beta_dpo", type=float, default=0.1, help="Implicit reward scaling temperature beta for DPO")
@@ -124,6 +264,11 @@ def main() -> None:
         print(f"DPO Beta              : {args.beta_dpo}")
     print(f"Target Scenarios      : {', '.join(scenarios)}")
     print(f"Max Turns / Episode   : {args.max_turns}")
+    print(f"Curriculum Mode       : {'ENABLED' if args.curriculum else 'DISABLED'}")
+    if args.curriculum:
+        print(f"Spatial Lambda Coord  : {args.lambda_coord}")
+        print(f"Policy Entropy Coeff  : {args.entropy_coeff} (decay: {args.entropy_decay})")
+        print(f"Temperature Annealing : {args.temperature} -> {args.min_temp} (decay: {args.temp_decay})")
     print(f"Activation Checkpoint : {'DISABLED' if args.no_checkpointing else 'ENABLED'}")
     print(f"Checkpoint Directory  : {args.checkpoint_dir}")
     print("=" * 80 + "\n")
@@ -159,13 +304,31 @@ def main() -> None:
     trainer_cfg = JEDM2TrainerConfig(lr=args.lr, weight_decay=args.weight_decay)
     optimizer, opt_type = build_optimizer(model, config=trainer_cfg, device=device)
 
-    # Interactive Rollout Sampler
+    # Interactive Rollout Sampler & Procedural Synthesizer
     sampler = TrajectoryRolloutSampler(
         model=model,
         config=model_config,
         tokenizer=tokenizer,
         device=device,
         dtype=dtype,
+    )
+
+    curriculum = CurriculumScheduler() if args.curriculum else None
+    scenario_gen = (
+        DynamicScenarioGenerator(config=model_config, device=device, dtype=dtype)
+        if args.curriculum
+        else None
+    )
+    if args.curriculum and args.scenarios == "ecommerce,travel,os_admin":
+        scenarios = list(DynamicScenarioGenerator.AVAILABLE_DOMAINS)
+
+    sched = ExplorationScheduler(
+        initial_temp=args.temperature,
+        min_temp=args.min_temp,
+        temp_decay=args.temp_decay,
+        initial_entropy_coeff=args.entropy_coeff,
+        min_entropy_coeff=args.min_entropy_coeff,
+        entropy_decay=args.entropy_decay,
     )
 
     # --------------------------------------------------------------------------
@@ -177,6 +340,8 @@ def main() -> None:
             clip_eps=args.clip_eps,
             beta_kl=args.beta_kl,
             temperature=args.temperature,
+            lambda_coord=args.lambda_coord,
+            entropy_coeff=args.entropy_coeff,
         )
         trainer = GRPOTrainer(
             model=model,
@@ -185,23 +350,39 @@ def main() -> None:
             optimizer=optimizer,
         )
 
-        print("[Header] Iteration | GRPO Loss | Mean Rew | Mean Adv | Mean KL | Clip Frac | Grad Norm | Tok/s | Peak VRAM")
-        print("-" * 105)
+        header_suffix = " | Curriculum" if args.curriculum else ""
+        print(f"[Header] Iteration | GRPO Loss | Mean Rew | Mean Adv | Mean KL | Clip Frac | Grad Norm | Tok/s | Peak VRAM{header_suffix}")
+        print("-" * 115)
 
         for iteration in range(1, args.iterations + 1):
             t_start = time.time()
             scenario_id = scenarios[(iteration - 1) % len(scenarios)]
 
+            # Dynamic curriculum turns & exploration annealing
+            cur_turns = curriculum.max_turns if curriculum is not None else args.max_turns
+            cur_temp = sched.temperature
+            trainer.config.temperature = cur_temp
+            trainer.config.entropy_coeff = sched.entropy_coeff
+            trainer.config.lambda_coord = args.lambda_coord
+
             # 1. Sample group of G rollouts in interactive environment
             group = sampler.sample_group_rollouts(
                 scenario_id=scenario_id,
                 group_size=args.group_size,
-                temperature=args.temperature,
-                max_turns=args.max_turns,
+                temperature=cur_temp,
+                max_turns=cur_turns,
+                generator=scenario_gen,
+                seed=args.seed + iteration * 100 if scenario_gen is not None else None,
             )
 
-            # 2. Collate rollouts into batched training tensors
-            batch = sampler.collate_rollouts(group)
+            # Record outcomes for curriculum advancement
+            if curriculum is not None:
+                advanced = curriculum.record_outcomes([t.success for t in group])
+                if advanced:
+                    print(f"  >>> [Curriculum] ADVANCED TO {curriculum.level_name.upper()}! <<<")
+
+            # 2. Collate rollouts into batched training tensors with shaped rewards
+            batch = sampler.collate_rollouts(group, reward_mode="shaped")
 
             # 3. Active Policy Gradient Step
             model.train()
@@ -213,11 +394,16 @@ def main() -> None:
                 mask=batch["mask"],
                 old_token_logps=batch["old_token_logps"],
                 rewards=batch["rewards"],
+                old_coord_logps=batch.get("old_coord_logps"),
+                target_coords=batch.get("target_coords"),
             )
 
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
             optimizer.step()
+
+            # Step exploration scheduler
+            sched.step()
 
             # Telemetry calculations
             elapsed = time.time() - t_start
@@ -231,6 +417,11 @@ def main() -> None:
             )
 
             if iteration % args.log_interval == 0 or iteration == args.iterations:
+                curr_info = (
+                    f" | L{curriculum.current_level} (SR:{curriculum.moving_success_rate * 100:4.1f}%)"
+                    if curriculum is not None
+                    else ""
+                )
                 print(
                     f"[{iteration:03d}/{args.iterations:03d}]  "
                     f"Loss: {metrics['loss_grpo']:7.4f} | "
@@ -241,6 +432,7 @@ def main() -> None:
                     f"Grad: {grad_norm:5.2f} | "
                     f"{throughput:5.1f} t/s | "
                     f"{peak_vram_mb:6.1f} MB"
+                    f"{curr_info}"
                 )
 
             # Checkpoint saving

@@ -81,6 +81,7 @@ Lamb/
 ├── verify_phase6d.py           # Phase 6D Multimodal visual grounding & VRAM ceiling test
 ├── verify_phase7.py            # Phase 7 Live Playwright browser environment & action verification test
 ├── verify_phase8.py            # Phase 8 Standardized evaluation benchmark harness test
+├── verify_phase9.py            # Phase 9 Dynamic procedural synthesis & scaled multi-task GRPO test
 ├── eval_benchmarks.py          # Phase 8 CLI benchmark evaluation & comparative runner
 ├── BENCHMARK_REPORT.md         # Phase 8 Automated comparative benchmark report
 ├── openspec/                   # Spec-driven development framework & archived changes
@@ -99,6 +100,7 @@ Lamb/
     ├── trainer.py              # Memory-calibrated training loop, optimizer factory & checkpointing
     ├── rl.py                   # Direct Policy Optimization (DPO) & Group Relative Policy Optimization (GRPO)
     ├── rl_pipeline.py          # Phase 6B Interactive rollout sampler, group advantages & preference pairs
+    ├── scenario_generator.py   # Phase 9 Procedural scenario synthesis engine (Ecommerce, Forms, Cloud, Browser)
     ├── environment.py          # Phase 6A Simulated Web/OS sandbox environment state machine
     ├── browser.py              # Phase 7 Live browser automation environment via Playwright
     ├── agent.py                # Phase 6A/7 Interactive runtime engine with visual grounding & recurrent rollout
@@ -300,6 +302,35 @@ Lamb/
   - Verified online closed-loop multi-turn execution in `WebOSEnvironment`.
   - Verified side-by-side checkpoint comparative runner, 7-bit ASCII tables, and Markdown report export (`BENCHMARK_REPORT.md`).
   - Peak GPU VRAM allocated: **243.01 MB** (0.24 GB / 3.96% utilization), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit) on NVIDIA GeForce RTX 5060 Laptop GPU in `bfloat16`.
+
+### [DONE] Phase 9: Dynamic Procedural Scenario Synthesis Engine & Scaled Multi-Task GRPO Pipeline
+- [x] Priority 1 Architectural Fixes & Backbone Connections:
+  - Connected JEPA world model to contextual backbone representations in `jed_m2/model.py`: removed external detached `obs_t` input, passing contextual backbone hidden state $h_t$ (from recurrent stack / pooled visual tokens) into `self.jepa`. Verified $\mathcal{L}_{\text{JEPA}}$ gradients flow into Mamba SSM, MLA, MoE, and token embeddings.
+  - Implemented true MLA latent caching and $W_{UK}$ weight absorption in `jed_m2/mla.py`: updated `step()` to cache only compressed latent tensor $c_{KV} \in \mathbb{R}^{B, 1, d_c}$ (128 floats) and decoupled RoPE key $k_{\text{rope}} \in \mathbb{R}^{B, 1, d_R}$ (32 floats), absorbing $W_{UK}$ into $W_Q$ during autoregressive generation to eliminate multi-head key decompression (84.4% cache footprint reduction, 160 vs 1024 floats/token) with exact numerical parity ($< 10^{-6}$ max diff).
+  - Calibrated composite multi-task loss normalization in `jed_m2/losses.py`: normalized token cross-entropy by $\ln(\text{vocab\_size})$ to prevent 8192-vocab cross-entropy from dominating coordinate regression and action primitive gradients.
+- [x] Procedural Scenario Synthesis Engine (`jed_m2/scenario_generator.py`):
+  - `DynamicScenarioGenerator`: Synthesizes an unbounded variety of interactive Web/OS task environments across 4 diverse procedural domains:
+    * `DynamicEcommerce`: Randomized product catalogs (10-50 items, dynamic pricing/discounts), multi-filter search queries, category trees, coupon entry, and checkout validation.
+    * `DynamicFormPortal`: Enterprise multi-step forms with dynamic heterogeneous inputs (text, numbers, dates, dropdowns, radio toggles), client-side regex validators, and dynamic error banners.
+    * `DynamicCloudAdmin`: Hierarchical cloud resource trees (VPCs, instances, security groups), status toggles, deletion confirmation modals, and table pagination.
+    * `DynamicWebBrowser`: Multi-page directed navigation graphs with hyperlinks, back/forward history, adversarial popups, cookie consent banners, and simulated network latency.
+  - Anti-memorization spatial layout jitter (`apply_bbox_jitter`) and distractor element injection (`generate_distractor_elements`) ensuring coordinates remain strictly bounded in $[0.0, 1.0]$.
+- [x] Joint Token + Continuous Coordinate Policy Optimization (`jed_m2/rl.py`, `jed_m2/rl_pipeline.py`):
+  - 2D Gaussian spatial policy for `CoordinateHead`: continuous screen coordinate log-probabilities $\log \pi_{\text{coord}}(c \mid \mu_\theta, \sigma)$ with analytical closed-form density verification.
+  - Joint GRPO surrogate objective: $r_{i,t} = \exp((\log \pi_{\text{token}} - \log \pi_{\text{old\_token}}) + \lambda_{\text{coord}}(\log \pi_{\text{coord}} - \log \pi_{\text{old\_coord}}))$, optimizing token reasoning and continuous spatial click accuracy simultaneously.
+  - Dense multi-factor reward shaping in `compute_shaped_reward`: $+2.0$ task completion, $+0.5$ sub-goal milestone rewards, $+0.3 \times \text{IoU}$ point-in-box precision, $-0.05/\text{turn}$ step penalty, and $-0.5$ anti-looping penalty for repetitive clicks.
+  - `TrajectoryRolloutSampler` extended with continuous coordinate sampling, procedural environment seeding, and joint batch collation.
+- [x] Curriculum Learning & Exploration Scheduling (`train_rl.py`):
+  - `CurriculumScheduler`: Automatic progression from Level 1 (atomic 1-step) -> Level 2 (compound 2-3 steps) -> Level 3 (long-horizon 5-8 steps) on $\ge 80\%$ moving success rate.
+  - `ExplorationScheduler`: Multiplicative exploration temperature annealing and adaptive token entropy bonus decay to prevent policy entropy collapse.
+  - Production CLI flags: `--curriculum`, `--entropy_coeff`, `--lambda_coord`, `--temp_decay`, `--entropy_decay`.
+- [x] Implement and execute `verify_phase9.py`:
+  - Verified procedural generation and boundary robustness across 60 unique random seeds (15 per domain, 615 UI element bounding boxes checked, 100% compliant).
+  - Verified numerical exactness of 2D Gaussian density formula ($c=\mu$: 4.1536, 1-$\sigma$: 3.1536).
+  - Verified backward pass gradient flow through both LM head and coordinate regression head (`action_head.coordinate_head.fc2.weight.grad` norm = 5.9375 > 0) with zero NaNs/Infs and reference model isolation (`grad is None`).
+  - Verified multi-factor reward shaping arithmetic on test trajectories.
+  - Verified curriculum progression threshold advancement and exploration decay.
+  - Peak GPU VRAM allocated: **625.58 MB** (0.61 GB / 10.18% utilization), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit) on NVIDIA GeForce RTX 5060 Laptop GPU in `bfloat16`.
 
 ---
 

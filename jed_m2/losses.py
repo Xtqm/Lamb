@@ -11,6 +11,7 @@ Calibrated for multi-task optimization across the Large Action Model (LAM):
 STRICT CONVENTION: Pure PyTorch without external compiled C++/CUDA packages or Hugging Face pipelines.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 import torch
@@ -26,11 +27,11 @@ from jed_m2.model import JEDM2Output
 class JEDM2LossConfig:
     """Configuration hyperparameters and calibrated weights for JED-M2 Composite Loss."""
 
-    # Loss component weighting coefficients
+    # Loss component weighting coefficients calibrated for balanced gradient magnitudes
     reason_weight: float = 1.0  # Weight for System 2 rationale NLL
     gate_weight: float = 1.0  # Weight for action gate emission binary classification
-    action_type_weight: float = 1.0  # Weight for discrete primitive classification
-    coord_weight: float = 5.0  # Weight for continuous (x, y) spatial coordinates
+    action_type_weight: float = 2.0  # Weight for discrete primitive classification
+    coord_weight: float = 10.0  # Weight for continuous (x, y) spatial coordinates
     arg_weight: float = 1.0  # Weight for argument token prediction
     jepa_weight: float = 1.0  # Weight for JEPA latent world model consistency
     aux_weight: float = 1.0  # Weight for MoE load-balancing auxiliary loss
@@ -38,6 +39,7 @@ class JEDM2LossConfig:
     # Regression and classification thresholds
     huber_beta: float = 0.05  # Beta threshold for Smooth L1 / Huber coordinate loss
     ignore_index: int = -100  # Index to ignore in cross-entropy evaluations
+    normalize_token_loss: bool = True  # Normalize token cross-entropy by log(vocab_size) to balance gradient scales
 
 
 class JEDM2CompositeLoss(nn.Module):
@@ -97,11 +99,16 @@ class JEDM2CompositeLoss(nn.Module):
                 shift_mask, shift_labels, torch.full_like(shift_labels, cfg.ignore_index)
             )
             # [B * (S-1), vocab_size] vs [B * (S-1)]
-            loss_reason = F.cross_entropy(
+            raw_loss_reason = F.cross_entropy(
                 shift_logits.view(-1, vocab_size),
                 masked_labels.view(-1),
                 ignore_index=cfg.ignore_index,
             )
+            # Scale-normalize cross-entropy by log(vocab_size) to align with Huber and discrete CE magnitudes
+            if getattr(cfg, "normalize_token_loss", True):
+                loss_reason = raw_loss_reason / math.log(max(2, vocab_size))
+            else:
+                loss_reason = raw_loss_reason
         else:
             loss_reason = 0.0 * lm_logits.sum()
 
@@ -195,9 +202,14 @@ class JEDM2CompositeLoss(nn.Module):
         if shift_arg_mask.any():
             valid_arg_logits = shift_arg_logits[shift_arg_mask]  # [N_args, vocab_size]
             valid_arg_targets = shift_arg_labels[shift_arg_mask]  # [N_args]
-            loss_arg = F.cross_entropy(
+            raw_loss_arg = F.cross_entropy(
                 valid_arg_logits, valid_arg_targets, ignore_index=cfg.ignore_index
             )
+            # Scale-normalize cross-entropy by log(vocab_size) to align with Huber and discrete CE magnitudes
+            if getattr(cfg, "normalize_token_loss", True):
+                loss_arg = raw_loss_arg / math.log(max(2, vocab_size))
+            else:
+                loss_arg = raw_loss_arg
         else:
             loss_arg = 0.0 * argument_logits.sum()
 

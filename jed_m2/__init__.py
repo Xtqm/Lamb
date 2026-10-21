@@ -64,12 +64,25 @@ from jed_m2.rl import (
     GRPOTrainer,
     calculate_dpo_loss,
     calculate_grpo_loss,
+    compute_coordinate_log_probs,
+    compute_point_box_iou,
+    compute_shaped_reward,
     compute_token_log_probs,
+    sample_continuous_coordinates,
 )
 from jed_m2.rl_pipeline import (
     RolloutTrajectory,
     RolloutTurn,
     TrajectoryRolloutSampler,
+)
+from jed_m2.scenario_generator import (
+    DynamicCloudAdminEnvironment,
+    DynamicEcommerceEnvironment,
+    DynamicFormPortalEnvironment,
+    DynamicScenarioGenerator,
+    DynamicWebBrowserEnvironment,
+    apply_bbox_jitter,
+    generate_distractor_elements,
 )
 from jed_m2.trainer import (
     JEDM2Trainer,
@@ -128,6 +141,10 @@ __all__ = [
     "calculate_dpo_loss",
     "calculate_grpo_loss",
     "compute_token_log_probs",
+    "compute_coordinate_log_probs",
+    "sample_continuous_coordinates",
+    "compute_point_box_iou",
+    "compute_shaped_reward",
     "WebOSEnvironment",
     "PlaywrightBrowserEnvironment",
     "PlaywrightStepResult",
@@ -147,4 +164,11 @@ __all__ = [
     "TaskEvaluator",
     "evaluate_offline_dataset",
     "evaluate_online_environment",
+    "DynamicScenarioGenerator",
+    "DynamicEcommerceEnvironment",
+    "DynamicFormPortalEnvironment",
+    "DynamicCloudAdminEnvironment",
+    "DynamicWebBrowserEnvironment",
+    "apply_bbox_jitter",
+    "generate_distractor_elements",
 ]

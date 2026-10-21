@@ -200,12 +200,12 @@ def main():
         assert conv_s.shape == (batch_size, config.mamba_inner_dim, config.mamba_d_conv), (
             f"Layer {l_idx} Conv state shape mismatch!"
         )
-        k_c, v_c = kv_c
-        assert k_c.shape == (batch_size, config.num_heads, rollout_steps, config.qk_head_dim), (
-            f"Layer {l_idx} Key cache shape mismatch!"
+        c_kv, k_rope = kv_c
+        assert c_kv.shape == (batch_size, rollout_steps, config.kv_lora_rank), (
+            f"Layer {l_idx} Compressed c_kv cache shape mismatch!"
         )
-        assert v_c.shape == (batch_size, config.num_heads, rollout_steps, config.v_head_dim), (
-            f"Layer {l_idx} Value cache shape mismatch!"
+        assert k_rope.shape == (batch_size, rollout_steps, 1, config.qk_rope_head_dim), (
+            f"Layer {l_idx} Shared k_rope cache shape mismatch!"
         )
 
     print(f"  -> Successfully rolled out {rollout_steps} recurrent steps across all 3 layers.")

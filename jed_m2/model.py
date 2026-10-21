@@ -332,13 +332,22 @@ class JEDM2Model(nn.Module):
         # System 1: Dual-system action heads with visual grounding
         action_output = self.action_head(h_text, visual_tokens=visual_tokens)
 
-        # JEPA World Model evaluation (if trajectory transition inputs provided)
+        # JEPA World Model evaluation: connect directly to contextual backbone representations
         jepa_loss, jepa_metrics = None, None
-        if obs_t is not None and action_t is not None and obs_next is not None:
+        if action_t is not None and obs_next is not None:
+            if obs_t is not None:
+                h_jepa_in = obs_t
+            else:
+                # Derive contextual backbone representation directly from recurrent stack
+                if h_text.ndim == 3:
+                    h_jepa_in = h_text.mean(dim=1)
+                else:
+                    h_jepa_in = h_text
+
             vt_t = visual_tokens_t if visual_tokens_t is not None else visual_tokens
             vt_next = visual_tokens_next
             _, _, jepa_loss, jepa_metrics = self.jepa(
-                obs_t,
+                h_jepa_in,
                 action_t,
                 obs_next,
                 visual_tokens_t=vt_t,

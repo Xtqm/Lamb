@@ -12,6 +12,7 @@ Provides:
 STRICT BUILD RULE: 100% native PyTorch without external compiled C++/CUDA packages.
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
@@ -22,7 +23,12 @@ from jed_m2.dataset import SimpleLAMTokenizer
 from jed_m2.environment import ScenarioDefinition, StepResult, WebOSEnvironment, get_default_scenarios
 from jed_m2.heads import ActionOutput, ActionType
 from jed_m2.model import JEDM2Model
-from jed_m2.rl import compute_token_log_probs
+from jed_m2.rl import (
+    compute_coordinate_log_probs,
+    compute_point_box_iou,
+    compute_shaped_reward,
+    compute_token_log_probs,
+)
 
 
 # ==============================================================================
@@ -46,6 +52,7 @@ class RolloutTurn:
     reward: float
     done: bool
     gate_prob: float
+    coord_logp: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes turn record to dictionary."""
@@ -57,6 +64,7 @@ class RolloutTurn:
             "action_type": self.action_type.name,
             "action_type_id": self.action_type_id,
             "coordinates": self.coordinates,
+            "coord_logp": self.coord_logp,
             "argument": self.argument,
             "reward": self.reward,
             "done": self.done,
@@ -265,15 +273,21 @@ class TrajectoryRolloutSampler:
             turn_tokens.append(action_token_id)
             turn_mask.append(False)
 
+            sigma = 0.05 * max(0.2, temperature)
             if temperature > 0.0:
                 act_probs = F.softmax(action_output.action_type_logits / temperature, dim=-1)
                 action_type_id = int(torch.multinomial(act_probs, num_samples=1).item())
                 action_type = ActionType(action_type_id)
 
                 raw_coords = action_output.coordinates.squeeze(0)  # [2]
-                coord_noise = torch.randn(2, device=self.device) * (0.05 * temperature)
+                coord_noise = torch.randn(2, device=self.device) * sigma
                 coord_x = float((raw_coords[0] + coord_noise[0]).clamp(0.0, 1.0).item())
                 coord_y = float((raw_coords[1] + coord_noise[1]).clamp(0.0, 1.0).item())
+
+                # Continuous Gaussian spatial policy log-density
+                var = max(1e-6, sigma ** 2)
+                sq_err = (coord_x - raw_coords[0].item()) ** 2 + (coord_y - raw_coords[1].item()) ** 2
+                coord_logp = float(-0.5 * (sq_err / var + 2.0 * math.log(2.0 * math.pi * var)))
 
                 arg_probs = F.softmax(action_output.argument_logits / temperature, dim=-1)
                 arg_token_id = int(torch.multinomial(arg_probs, num_samples=1).item())
@@ -285,6 +299,7 @@ class TrajectoryRolloutSampler:
                 raw_coords = action_output.coordinates.squeeze(0)  # [2]
                 coord_x = float(raw_coords[0].clamp(0.0, 1.0).item())
                 coord_y = float(raw_coords[1].clamp(0.0, 1.0).item())
+                coord_logp = 0.0
 
                 arg_token_id = int(torch.argmax(action_output.argument_logits, dim=-1).item())
                 arg_str = self.tokenizer.decode([arg_token_id]).strip()
@@ -398,6 +413,7 @@ class TrajectoryRolloutSampler:
                 reward=step_res.reward,
                 done=step_res.done,
                 gate_prob=gate_prob,
+                coord_logp=coord_logp,
             )
             turns.append(record)
 
@@ -431,27 +447,35 @@ class TrajectoryRolloutSampler:
         group_size: int = 4,
         temperature: float = 0.7,
         max_turns: int = 8,
+        generator: Optional[Any] = None,
+        seed: Optional[int] = None,
     ) -> List[RolloutTrajectory]:
         """
         Samples a group of G rollout trajectories for a single scenario goal for GRPO.
+        Supports both built-in benchmark scenarios and procedural environment synthesis.
 
         Args:
-            scenario_id: Identifier of benchmark scenario ('ecommerce', 'travel', 'os_admin').
+            scenario_id: Identifier of benchmark or procedural domain.
             group_size: Number of rollouts G to sample per group.
             temperature: Exploration sampling temperature.
             max_turns: Maximum allowed turns per episode.
+            generator: Optional DynamicScenarioGenerator instance.
+            seed: Optional integer seed for procedural generation.
 
         Returns:
             List of G RolloutTrajectory instances.
         """
         group: List[RolloutTrajectory] = []
         for _ in range(group_size):
-            env = WebOSEnvironment(
-                config=self.config,
-                scenario_id=scenario_id,
-                device=self.device,
-                dtype=self.dtype,
-            )
+            if generator is not None:
+                env = generator.generate(domain=scenario_id, seed=seed)
+            else:
+                env = WebOSEnvironment(
+                    config=self.config,
+                    scenario_id=scenario_id,
+                    device=self.device,
+                    dtype=self.dtype,
+                )
             traj = self.sample_trajectory(env, temperature=temperature, max_turns=max_turns)
             group.append(traj)
 
@@ -460,14 +484,15 @@ class TrajectoryRolloutSampler:
     def collate_rollouts(
         self,
         trajectories: List[RolloutTrajectory],
-        reward_mode: str = "cumulative",
+        reward_mode: str = "shaped",
     ) -> Dict[str, torch.Tensor]:
         """
-        Collates a list of rollout trajectories into batched tensors formatted for GRPOTrainer.
+        Collates a list of rollout trajectories into batched tensors formatted for GRPOTrainer,
+        including continuous spatial coordinate targets and dense shaped rewards.
 
         Args:
             trajectories: List of B RolloutTrajectory instances.
-            reward_mode: 'cumulative' (step rewards + terminal) or 'terminal' (0.0 or 1.0).
+            reward_mode: 'shaped' (dense multi-factor), 'cumulative', or 'terminal'.
 
         Returns:
             Dictionary containing:
@@ -475,6 +500,8 @@ class TrajectoryRolloutSampler:
             - targets: [B, S]
             - mask: [B, S] (bool)
             - old_token_logps: [B, S]
+            - old_coord_logps: [B, S]
+            - target_coords: [B, S, 2]
             - rewards: [B]
             - advantages: [B] (group-normalized advantages)
         """
@@ -494,6 +521,9 @@ class TrajectoryRolloutSampler:
         )
         padded_mask = torch.zeros(
             (batch_size, max_seq_len), dtype=torch.bool, device=self.device
+        )
+        padded_target_coords = torch.zeros(
+            (batch_size, max_seq_len, 2), dtype=torch.float32, device=self.device
         )
 
         raw_rewards: List[float] = []
@@ -515,23 +545,59 @@ class TrajectoryRolloutSampler:
                     mask[1 : s_len + 1], dtype=torch.bool, device=self.device
                 )
 
+            # Assign coordinate targets from turns
+            turn_pos = 0
+            for turn in traj.turns:
+                t_len = len(turn.step_tokens)
+                if turn_pos < max_seq_len:
+                    padded_target_coords[b, turn_pos : min(max_seq_len, turn_pos + t_len)] = torch.tensor(
+                        turn.coordinates, dtype=torch.float32, device=self.device
+                    )
+                turn_pos += t_len
+
             # Guard: ensure at least one active token in mask to prevent zero-sum division
             if not padded_mask[b, :s_len].any() and s_len > 0:
                 padded_mask[b, s_len - 1] = True
 
-            if reward_mode == "terminal":
+            if reward_mode == "shaped":
+                # Compute dense multi-factor reward shaping
+                repeated_count = 0
+                for t_i in range(1, len(traj.turns)):
+                    prev_t = traj.turns[t_i - 1]
+                    curr_t = traj.turns[t_i]
+                    if prev_t.action_type == curr_t.action_type:
+                        dist = math.hypot(
+                            curr_t.coordinates[0] - prev_t.coordinates[0],
+                            curr_t.coordinates[1] - prev_t.coordinates[1],
+                        )
+                        if dist < 0.05:
+                            repeated_count += 1
+
+                milestone_count = sum(1 for t in traj.turns if t.reward > 0.0 and not t.done)
+                shaped_r = compute_shaped_reward(
+                    goal_satisfied=traj.success,
+                    milestones_count=milestone_count,
+                    turn_count=len(traj.turns),
+                    iou_sum=0.5 if traj.success else 0.0,
+                    repeated_action_count=repeated_count,
+                )
+                raw_rewards.append(shaped_r)
+            elif reward_mode == "terminal":
                 raw_rewards.append(traj.terminal_reward)
             else:
                 raw_rewards.append(traj.cumulative_reward)
 
         rewards_tensor = torch.tensor(raw_rewards, dtype=torch.float32, device=self.device)
 
-        # Compute old_token_logps under rollout policy using forward pass in torch.no_grad()
+        # Compute old logps under rollout policy using forward pass in torch.no_grad()
         self.model.eval()
         with torch.no_grad():
             rollout_out = self.model(input_ids=padded_input_ids)
             old_token_logps, _ = compute_token_log_probs(
                 rollout_out.lm_logits, padded_targets, padded_mask
+            )
+            old_coord_logps = compute_coordinate_log_probs(
+                rollout_out.action_output.coordinates, padded_target_coords, sigma=0.05
             )
 
         # Compute group-normalized advantages: A_i = (r_i - mean) / (std + 1e-8)
@@ -547,6 +613,8 @@ class TrajectoryRolloutSampler:
             "targets": padded_targets,
             "mask": padded_mask,
             "old_token_logps": old_token_logps,
+            "old_coord_logps": old_coord_logps,
+            "target_coords": padded_target_coords,
             "rewards": rewards_tensor,
             "advantages": advantages,
         }

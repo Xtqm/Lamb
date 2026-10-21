@@ -7,6 +7,7 @@ Implements:
 Calibrated for Large Action Models executing multi-turn digital agent tasks.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
@@ -34,6 +35,103 @@ class GRPOConfig:
     clip_eps: float = 0.2  # PPO-style surrogate objective clipping threshold epsilon
     beta_kl: float = 0.04  # KL divergence penalty coefficient against reference model
     temperature: float = 0.7  # Rollout generation sampling temperature
+    lambda_coord: float = 0.5  # Weighting for continuous spatial coordinate policy gradient ratio
+    coord_sigma: float = 0.05  # Gaussian spatial exploration std dev
+    coord_kl_beta: float = 0.01  # Spatial coordinate KL regularization weight
+    entropy_coeff: float = 0.01  # Token policy entropy regularization bonus weight
+
+
+def compute_coordinate_log_probs(
+    pred_coords: torch.Tensor,
+    target_coords: torch.Tensor,
+    sigma: float = 0.05,
+) -> torch.Tensor:
+    """
+    Computes 2D continuous Gaussian log-probabilities:
+        log pi_coord(c | mu, sigma) = -0.5 * sum_{k in {x, y}} [ ((c_k - mu_k)^2 / sigma^2) + ln(2 * pi * sigma^2) ]
+
+    Args:
+        pred_coords: Mean predicted coordinates [..., 2] in [0, 1].
+        target_coords: Sampled action coordinates [..., 2] in [0, 1].
+        sigma: Standard deviation of Gaussian exploration policy.
+
+    Returns:
+        Tensor of coordinate log-probabilities of shape [...].
+    """
+    var = max(1e-6, sigma ** 2)
+    diff_sq = (target_coords - pred_coords).pow(2)  # [..., 2]
+    # Sum over x and y dimensions
+    log_probs = -0.5 * (diff_sq.sum(dim=-1) / var + 2.0 * math.log(2.0 * math.pi * var))
+    return log_probs
+
+
+def sample_continuous_coordinates(
+    mu_coords: torch.Tensor,
+    sigma: float = 0.05,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Samples continuous 2D coordinates from a Gaussian spatial policy centered at mu_coords.
+
+    Args:
+        mu_coords: Mean predicted coordinates [..., 2] in [0, 1].
+        sigma: Standard deviation of exploration.
+
+    Returns:
+        Tuple of (sampled_coords in [0, 1], log_probs).
+    """
+    noise = torch.randn_like(mu_coords) * sigma
+    sampled = (mu_coords + noise).clamp(0.0, 1.0)
+    logps = compute_coordinate_log_probs(mu_coords, sampled, sigma=sigma)
+    return sampled, logps
+
+
+def compute_point_box_iou(
+    coords: Tuple[float, float],
+    bbox: Tuple[float, float, float, float],
+    point_radius: float = 0.03,
+) -> float:
+    """
+    Computes 2D Intersection-over-Union (IoU) between a point radius buffer and target bounding box.
+    """
+    px, py = coords
+    bx1, by1, bx2, by2 = bbox
+    px1, py1 = max(0.0, px - point_radius), max(0.0, py - point_radius)
+    px2, py2 = min(1.0, px + point_radius), min(1.0, py + point_radius)
+
+    ix1, iy1 = max(px1, bx1), max(py1, by1)
+    ix2, iy2 = min(px2, bx2), min(py2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+
+    intersection = (ix2 - ix1) * (iy2 - iy1)
+    p_area = (px2 - px1) * (py2 - py1)
+    b_area = max(1e-6, (bx2 - bx1) * (by2 - by1))
+    union = p_area + b_area - intersection
+    return float(intersection / max(1e-8, union))
+
+
+def compute_shaped_reward(
+    goal_satisfied: bool,
+    milestones_count: int = 0,
+    turn_count: int = 1,
+    iou_sum: float = 0.0,
+    repeated_action_count: int = 0,
+    completion_bonus: float = 2.0,
+    milestone_reward: float = 0.5,
+    iou_weight: float = 0.3,
+    step_penalty: float = 0.05,
+    looping_penalty: float = 0.5,
+) -> float:
+    """
+    Dense multi-factor reward shaping for digital LAM agents:
+    R = (+2.0 * completion) + (+0.5 * milestones) + (+0.3 * IoU) - (0.05 * steps) - (0.5 * loops)
+    """
+    r_task = completion_bonus if goal_satisfied else 0.0
+    r_milestone = milestone_reward * milestones_count
+    r_iou = iou_weight * max(0.0, min(1.0, iou_sum))
+    r_step = -step_penalty * max(0, turn_count)
+    r_loop = -looping_penalty * max(0, repeated_action_count)
+    return round(r_task + r_milestone + r_iou + r_step + r_loop, 4)
 
 
 def compute_token_log_probs(
@@ -141,28 +239,25 @@ def calculate_grpo_loss(
     ref_token_logps: torch.Tensor,
     rewards: torch.Tensor,
     mask: torch.Tensor,
+    policy_coord_logps: Optional[torch.Tensor] = None,
+    old_coord_logps: Optional[torch.Tensor] = None,
+    ref_coord_logps: Optional[torch.Tensor] = None,
+    policy_logits: Optional[torch.Tensor] = None,
     config: Optional[GRPOConfig] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
-    Computes Group Relative Policy Optimization (GRPO) loss for groups of sampled agent rollouts.
+    Computes Group Relative Policy Optimization (GRPO) loss with Joint Token and
+    Continuous Spatial Coordinate Policy Gradient Optimization.
 
     Advantage estimation is group-normalized across rollouts for the same prompt:
         A_i = (r_i - mean({r})) / (std({r}) + eps)
 
-    The surrogate objective clips probability ratios and adds token-level KL penalties:
+    Joint ratio r_{i,t}:
+        r_{i,t} = exp((log pi_token - log pi_old_token) + lambda_coord * (log pi_coord - log pi_old_coord))
+
+    The surrogate objective clips probability ratios and adds reference KL divergence penalties:
         L_GRPO = - 1/G sum_{i=1}^G 1/|T_i| sum_{t} [ min(r_{i,t} A_i, clip(r_{i,t}, 1-eps, 1+eps) A_i)
-                                                    - beta_kl * D_KL(pi_theta || pi_ref) ]
-
-    Args:
-        policy_token_logps: Token log-probabilities from active policy [B, S].
-        old_token_logps: Token log-probabilities from rollout policy [B, S].
-        ref_token_logps: Token log-probabilities from frozen reference policy [B, S].
-        rewards: Scalar trajectory outcome rewards [B].
-        mask: Valid action/thought token mask [B, S].
-        config: Optional GRPO configuration.
-
-    Returns:
-        Tuple of (scalar_grpo_loss, metrics_dictionary).
+                                                    - beta_kl * D_KL(pi || pi_ref) ]
     """
     cfg = config if config is not None else GRPOConfig()
     batch_size = rewards.shape[0]
@@ -182,10 +277,16 @@ def calculate_grpo_loss(
     # [num_groups, group_size] -> [B]
     advantages = ((rewards_grouped - group_means) / group_stds).view(batch_size)
 
-    # 2. Probability ratio r_{i, t} = exp(log pi_theta - log pi_old): [B, S]
-    # [B, S] - [B, S] -> [B, S]
-    log_ratio = policy_token_logps - old_token_logps
-    ratio = torch.exp(log_ratio)
+    # 2. Joint Probability ratio r_{i, t}: [B, S]
+    log_token_ratio = policy_token_logps - old_token_logps
+    if policy_coord_logps is not None and old_coord_logps is not None:
+        log_coord_ratio = policy_coord_logps - old_coord_logps
+        joint_log_ratio = log_token_ratio + cfg.lambda_coord * log_coord_ratio
+    else:
+        joint_log_ratio = log_token_ratio
+
+    joint_log_ratio = joint_log_ratio.clamp(min=-5.0, max=5.0)
+    ratio = torch.exp(joint_log_ratio)
 
     # 3. Clipped surrogate policy gradient objective: [B, S]
     adv_expanded = advantages.unsqueeze(1)  # [B, 1]
@@ -193,22 +294,35 @@ def calculate_grpo_loss(
     surr2 = torch.clamp(ratio, 1.0 - cfg.clip_eps, 1.0 + cfg.clip_eps) * adv_expanded
     policy_loss = -torch.min(surr1, surr2)  # [B, S]
 
-    # 4. Token-level KL divergence penalty against reference policy (Schulman unbiased estimator):
-    # D_KL(pi || pi_ref) approx exp(log_ref - log_pi) - (log_ref - log_pi) - 1
-    # Clamped to [-5.0, 5.0] to prevent exponential numerical explosion under bfloat16
+    # 4. Token & Coordinate KL divergence penalty against reference policy
     kl_ratio = (ref_token_logps - policy_token_logps).clamp(min=-5.0, max=5.0)
     kl_penalty = torch.exp(kl_ratio) - kl_ratio - 1.0  # [B, S]
 
-    # 5. Composite token objective: [B, S]
-    total_token_loss = policy_loss + cfg.beta_kl * kl_penalty
+    if policy_coord_logps is not None and ref_coord_logps is not None:
+        coord_kl = (policy_coord_logps - ref_coord_logps).abs().clamp(max=5.0)
+        total_kl = kl_penalty + cfg.coord_kl_beta * coord_kl
+    else:
+        total_kl = kl_penalty
+
+    # 5. Composite token & spatial objective: [B, S]
+    total_token_loss = policy_loss + cfg.beta_kl * total_kl
 
     # Aggregate over masked action/thought tokens
     mask_f = mask.float()
     active_tokens = mask_f.sum().clamp(min=1.0)
     loss = (total_token_loss * mask_f).sum() / active_tokens
 
+    # 6. Adaptive Token Policy Entropy Regularization Bonus
+    mean_entropy = 0.0
+    if policy_logits is not None and cfg.entropy_coeff > 0.0:
+        log_probs = F.log_softmax(policy_logits, dim=-1)
+        probs = torch.exp(log_probs)
+        token_entropy = -(probs * log_probs).sum(dim=-1)  # [B, S]
+        mean_entropy = (token_entropy * mask_f).sum() / active_tokens
+        loss = loss - cfg.entropy_coeff * mean_entropy
+
     with torch.no_grad():
-        mean_kl = (kl_penalty * mask_f).sum() / active_tokens
+        mean_kl = (total_kl * mask_f).sum() / active_tokens
         clip_fraction = (
             ((ratio < (1.0 - cfg.clip_eps)) | (ratio > (1.0 + cfg.clip_eps)))
             .float()
@@ -221,6 +335,7 @@ def calculate_grpo_loss(
         "mean_kl": float(mean_kl.item()),
         "clip_fraction": float(clip_fraction.item()),
         "mean_reward": float(rewards.mean().item()),
+        "mean_entropy": float(mean_entropy if isinstance(mean_entropy, float) else mean_entropy.item()),
     }
 
     return loss, metrics
@@ -364,9 +479,11 @@ class GRPOTrainer:
         mask: torch.Tensor,
         old_token_logps: torch.Tensor,
         rewards: torch.Tensor,
+        old_coord_logps: Optional[torch.Tensor] = None,
+        target_coords: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        Computes GRPO loss for grouped trajectory rollouts.
+        Computes GRPO loss for grouped trajectory rollouts with optional joint spatial policy optimization.
 
         Args:
             input_ids: Trajectory tokens of shape [B, S].
@@ -374,6 +491,8 @@ class GRPOTrainer:
             mask: Active token mask of shape [B, S].
             old_token_logps: Rollout policy token log probabilities [B, S].
             rewards: Trajectory outcome rewards [B].
+            old_coord_logps: Optional rollout policy coordinate log probabilities [B, S].
+            target_coords: Optional target coordinate vectors [B, S, 2].
 
         Returns:
             Tuple of (scalar_grpo_loss, metrics_dictionary).
@@ -384,12 +503,23 @@ class GRPOTrainer:
             policy_out.lm_logits, targets, mask
         )
 
+        policy_coord_logps = None
+        ref_coord_logps = None
+        if target_coords is not None and old_coord_logps is not None:
+            policy_coord_logps = compute_coordinate_log_probs(
+                policy_out.action_output.coordinates, target_coords, sigma=self.config.coord_sigma
+            )
+
         # Reference policy forward
         with torch.no_grad():
             ref_out = self.ref_model(input_ids=input_ids)
             ref_token_logps, _ = compute_token_log_probs(
                 ref_out.lm_logits, targets, mask
             )
+            if target_coords is not None and old_coord_logps is not None:
+                ref_coord_logps = compute_coordinate_log_probs(
+                    ref_out.action_output.coordinates, target_coords, sigma=self.config.coord_sigma
+                )
 
         return calculate_grpo_loss(
             policy_token_logps=policy_token_logps,
@@ -397,5 +527,9 @@ class GRPOTrainer:
             ref_token_logps=ref_token_logps,
             rewards=rewards,
             mask=mask,
+            policy_coord_logps=policy_coord_logps,
+            old_coord_logps=old_coord_logps,
+            ref_coord_logps=ref_coord_logps,
+            policy_logits=policy_out.lm_logits,
             config=self.config,
         )
