@@ -33,7 +33,7 @@ from jed_m2.benchmark import (
     evaluate_offline_dataset,
     evaluate_online_environment,
 )
-from jed_m2.config import JEDM2Config
+from jed_m2.config import JEDM2Config, JEDM2MediumConfig
 from jed_m2.dataset import (
     AgentTrajectoryDataset,
     SimpleLAMTokenizer,
@@ -103,6 +103,13 @@ def parse_args() -> argparse.Namespace:
         help="Computation precision.",
     )
     parser.add_argument(
+        "--model_size",
+        type=str,
+        default="nano",
+        choices=["nano", "medium"],
+        help="Model scale tier: nano (~53M params) or medium (~273M params)",
+    )
+    parser.add_argument(
         "--output_report",
         type=str,
         default="BENCHMARK_REPORT.md",
@@ -127,6 +134,7 @@ def load_model(
     checkpoint_path: Optional[str],
     device: torch.device,
     dtype: torch.dtype,
+    model_size: str = "nano",
 ) -> Tuple[JEDM2Model, str]:
     """
     Loads JEDM2Model from a checkpoint file or creates an initialized baseline model.
@@ -135,25 +143,60 @@ def load_model(
         checkpoint_path: Path to checkpoint .pt file or None.
         device: Hardware device.
         dtype: PyTorch data type.
+        model_size: Default model size tier if not specified in checkpoint.
 
     Returns:
         Tuple of (model, checkpoint_label).
     """
     if checkpoint_path is None or checkpoint_path.lower() == "random" or not os.path.exists(checkpoint_path):
-        config = JEDM2Config()
+        config = JEDM2MediumConfig() if model_size == "medium" else JEDM2Config()
         model = JEDM2Model(config)
-        label = "Untrained Base" if checkpoint_path is None else os.path.basename(checkpoint_path)
+        default_label = "Untrained Medium" if model_size == "medium" else "Untrained Base"
+        label = default_label if checkpoint_path is None else os.path.basename(checkpoint_path)
     else:
         # Load checkpoint payload
         data = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         if isinstance(data, dict) and "model_config" in data:
             config = JEDM2Config(**data["model_config"])
+        elif model_size == "medium":
+            config = JEDM2MediumConfig()
         else:
             config = JEDM2Config()
 
         model = JEDM2Model(config)
         state_dict = data.get("model_state_dict", data) if isinstance(data, dict) else data
-        model.load_state_dict(state_dict)
+        model_keys = set(model.state_dict().keys())
+        ckpt_keys = set(state_dict.keys())
+
+        # If key schema differs, remap transparently
+        if not ckpt_keys.issubset(model_keys):
+            remapped_sd = {}
+            for k, v in state_dict.items():
+                k_new = k
+                # If model expects mla/moe but ckpt has attn/ffn
+                if any(".norm_mla." in mk for mk in model_keys) and ".norm_attn." in k:
+                    k_new = k_new.replace(".norm_attn.", ".norm_mla.")
+                if any(".mla." in mk for mk in model_keys) and ".attn." in k:
+                    k_new = k_new.replace(".attn.", ".mla.")
+                if any(".norm_moe." in mk for mk in model_keys) and ".norm_ffn." in k:
+                    k_new = k_new.replace(".norm_ffn.", ".norm_moe.")
+                if any(".moe." in mk for mk in model_keys) and ".ffn." in k:
+                    k_new = k_new.replace(".ffn.", ".moe.")
+                # If model expects attn/ffn but ckpt has mla/moe
+                if any(".norm_attn." in mk for mk in model_keys) and ".norm_mla." in k:
+                    k_new = k_new.replace(".norm_mla.", ".norm_attn.")
+                if any(".attn." in mk for mk in model_keys) and ".mla." in k:
+                    k_new = k_new.replace(".mla.", ".attn.")
+                if any(".norm_ffn." in mk for mk in model_keys) and ".norm_moe." in k:
+                    k_new = k_new.replace(".norm_moe.", ".norm_ffn.")
+                if any(".ffn." in mk for mk in model_keys) and ".moe." in k:
+                    k_new = k_new.replace(".moe.", ".ffn.")
+                remapped_sd[k_new] = v
+            state_dict = remapped_sd
+
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            print(f"[load_model] Loaded with missing keys: {len(missing)}, unexpected: {len(unexpected)}")
         label = os.path.splitext(os.path.basename(checkpoint_path))[0]
 
     model.to(device=device, dtype=dtype)
@@ -203,6 +246,7 @@ def run_benchmark_for_checkpoint(
     tolerance: float,
     seed: int,
     offline_trajectories: Optional[List[TrajectorySample]] = None,
+    model_size: str = "nano",
 ) -> BenchmarkSummary:
     """
     Runs benchmark evaluation for a single model checkpoint.
@@ -218,6 +262,7 @@ def run_benchmark_for_checkpoint(
         tolerance: Spatial tolerance radius.
         seed: Random seed.
         offline_trajectories: Pre-generated trajectory list if running offline evaluation.
+        model_size: Model size tier ('nano' or 'medium').
 
     Returns:
         BenchmarkSummary for this checkpoint.
@@ -226,7 +271,7 @@ def run_benchmark_for_checkpoint(
     dtype = torch.bfloat16 if dtype_str == "bfloat16" and "cuda" in device_str else torch.float32
 
     # Load model
-    model, label = load_model(checkpoint_path, device=device, dtype=dtype)
+    model, label = load_model(checkpoint_path, device=device, dtype=dtype, model_size=model_size)
     tokenizer = SimpleLAMTokenizer(model.config.vocab_size)
     agent = JEDM2Agent(model=model, config=model.config, tokenizer=tokenizer, device=device, dtype=dtype)
     evaluator = TaskEvaluator(tolerance_radius=tolerance)
@@ -330,6 +375,7 @@ def main():
             tolerance=args.tolerance,
             seed=args.seed,
             offline_trajectories=offline_trajectories,
+            model_size=args.model_size,
         )
         elapsed = time.perf_counter() - t_start
         print(

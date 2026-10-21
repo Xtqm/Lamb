@@ -14,7 +14,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 import torch
 
-from jed_m2.config import JEDM2Config
+from jed_m2.config import JEDM2Config, JEDM2MediumConfig
 from jed_m2.dataset import AgentTrajectoryDataset, TrajectoryCollator
 from jed_m2.losses import JEDM2LossConfig
 from jed_m2.model import JEDM2Model
@@ -38,6 +38,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=16, help="Target effective batch size")
     parser.add_argument("--micro_batch_size", type=int, default=2, help="Micro-batch size per forward pass")
     parser.add_argument("--seq_len", type=int, default=2048, help="Maximum sequence length")
+    parser.add_argument(
+        "--model_size",
+        type=str,
+        default="nano",
+        choices=["nano", "medium"],
+        help="Model scale tier: nano (~53M params) or medium (~273M params)",
+    )
 
     # Checkpoint & Persistence
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory for saved checkpoints")
@@ -79,6 +86,7 @@ def main(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
     print("=" * 80)
     print("      JED-M2 Native Large Action Model - Training Harness")
     print("=" * 80)
+    print(f"Model Scale Tier      : {args.model_size.upper()}")
     print(f"Hardware Device       : {gpu_name} ({device})")
     print(f"Max Sequence Length   : {args.seq_len}")
     print(f"Micro-Batch Size      : {args.micro_batch_size}")
@@ -95,7 +103,10 @@ def main(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
     print("=" * 80 + "\n")
 
     # Instantiate model and loss configurations
-    model_config = JEDM2Config(max_seq_len=args.seq_len)
+    if args.model_size == "medium":
+        model_config = JEDM2MediumConfig(max_seq_len=args.seq_len)
+    else:
+        model_config = JEDM2Config(max_seq_len=args.seq_len)
     loss_config = JEDM2LossConfig()
 
     trainer_config = JEDM2TrainerConfig(

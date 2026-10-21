@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from jed_m2.config import JEDM2Config
+from jed_m2.config import JEDM2Config, JEDM2MediumConfig
 from jed_m2.baselines import DenseSwiGLUFFN, StandardMHA
 from jed_m2.heads import ActionOutput, NativeActionHead
 from jed_m2.jepa import JEPAWorldModel
@@ -88,27 +88,57 @@ class JEDM2Block(nn.Module):
             self.mamba = None
 
         # 2. Attention (MLA or Standard MHA)
-        self.norm_attn = RMSNorm(self.hidden_dim, eps=eps)
         if self.attn_type == "mha":
+            self.norm_attn = RMSNorm(self.hidden_dim, eps=eps)
             self.attn = StandardMHA(config)
         else:
-            self.attn = MultiHeadLatentAttention(config)
-
-        # Backward compatibility aliases
-        self.norm_mla = self.norm_attn
-        self.mla = self.attn
+            self.norm_mla = RMSNorm(self.hidden_dim, eps=eps)
+            self.mla = MultiHeadLatentAttention(config)
 
         # 3. Feed-Forward Network (Sparse Top-2 MoE or Dense SwiGLU)
-        self.norm_ffn = RMSNorm(self.hidden_dim, eps=eps)
         if self.ffn_type == "dense":
+            self.norm_ffn = RMSNorm(self.hidden_dim, eps=eps)
             dense_dim = getattr(config, "dense_intermediate_dim", 1024)
             self.ffn = DenseSwiGLUFFN(self.hidden_dim, dense_dim)
         else:
-            self.ffn = SparseTop2MoE(config)
+            self.norm_moe = RMSNorm(self.hidden_dim, eps=eps)
+            self.moe = SparseTop2MoE(config)
 
-        # Backward compatibility aliases
-        self.norm_moe = self.norm_ffn
-        self.moe = self.ffn
+    def __getattr__(self, name: str) -> Any:
+        # Dynamic backward/cross-compatibility aliases (avoids duplicate module registration)
+        if name == "attn":
+            mod = self._modules.get("attn") or self._modules.get("mla")
+            if mod is not None:
+                return mod
+        elif name == "norm_attn":
+            mod = self._modules.get("norm_attn") or self._modules.get("norm_mla")
+            if mod is not None:
+                return mod
+        elif name == "ffn":
+            mod = self._modules.get("ffn") or self._modules.get("moe")
+            if mod is not None:
+                return mod
+        elif name == "norm_ffn":
+            mod = self._modules.get("norm_ffn") or self._modules.get("norm_moe")
+            if mod is not None:
+                return mod
+        elif name == "mla":
+            mod = self._modules.get("mla") or self._modules.get("attn")
+            if mod is not None:
+                return mod
+        elif name == "norm_mla":
+            mod = self._modules.get("norm_mla") or self._modules.get("norm_attn")
+            if mod is not None:
+                return mod
+        elif name == "moe":
+            mod = self._modules.get("moe") or self._modules.get("ffn")
+            if mod is not None:
+                return mod
+        elif name == "norm_moe":
+            mod = self._modules.get("norm_moe") or self._modules.get("norm_ffn")
+            if mod is not None:
+                return mod
+        return super().__getattr__(name)
 
     def forward(
         self,
@@ -467,8 +497,9 @@ class JEDM2Model(nn.Module):
     def count_parameters(self) -> Dict[str, int]:
         """
         Computes total, trainable, and active parameters per token.
-        In SparseTop2MoE, only 2 of 8 experts are active per token,
-        rendering 6 experts inactive.
+        In SparseTop2MoE with N experts (e.g. 8 in Nano, 16 in Medium), only top_k (2)
+        experts are active per token, rendering (N - top_k) experts inactive.
+        Also accounts for non-trainable EMA parameters in the JEPA target encoder.
         """
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -498,3 +529,23 @@ class JEDM2Model(nn.Module):
             "active_params": active_params,
             "inactive_moe_params": inactive_moe_params,
         }
+
+
+def create_jed_m2_nano(config: Optional[JEDM2Config] = None, **kwargs) -> JEDM2Model:
+    """
+    Factory creating a JED-M2-Nano Large Action Model.
+    Default: ~53M total parameters / ~24M active parameters per token across 3 recurrent blocks.
+    """
+    cfg = config if config is not None else JEDM2Config(**kwargs)
+    return JEDM2Model(cfg)
+
+
+def create_jed_m2_medium(config: Optional[JEDM2Config] = None, **kwargs) -> JEDM2Model:
+    """
+    Factory creating a JED-M2-Medium Large Action Model.
+    Calibrated: ~273M total parameters / ~75M active parameters per token across 6 recurrent blocks
+    with 16 SwiGLU experts, 12 MLA heads, d_inner=1536 Mamba SSM, and d_z=384 JEPA.
+    """
+    cfg = config if config is not None else JEDM2MediumConfig(**kwargs)
+    return JEDM2Model(cfg)
+

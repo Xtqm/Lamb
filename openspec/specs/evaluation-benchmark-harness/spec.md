@@ -39,7 +39,7 @@ The system SHALL support online closed-loop multi-turn agent evaluation across i
 - **THEN** the agent navigates real web pages, captures screenshots and DOM snapshots, dispatches browser primitives, and records task completion metrics.
 
 ### Requirement: Comparative Checkpoint Benchmarking and Reporting
-The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) that evaluates multiple model checkpoints side-by-side, renders clean ASCII terminal comparison tables, and exports formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).
+The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) supporting configurable model scaling tiers (`--model_size {nano,medium}`), evaluating multiple model checkpoints side-by-side, rendering clean ASCII terminal comparison tables, and exporting formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).
 
 #### Scenario: Side-by-side checkpoint comparison
 - **WHEN** multiple checkpoint paths (e.g. SFT baseline vs. GRPO RL checkpoints) are passed to the comparative evaluation runner
@@ -48,6 +48,10 @@ The system SHALL provide a comparative evaluation runner and CLI script (`eval_b
 #### Scenario: Formal Markdown report export
 - **WHEN** a benchmark evaluation run completes
 - **THEN** the system exports `BENCHMARK_REPORT.md` documenting task configurations, per-checkpoint metrics, latency, and hardware telemetry.
+
+#### Scenario: Benchmark evaluation with configurable model size
+- **WHEN** `eval_benchmarks.py` is executed with `--model_size medium`
+- **THEN** the runner loads or instantiates the medium architecture configuration, executes inference evaluation passes with $O(1)$ latent state caching, and computes evaluation metrics without memory errors
 
 ### Requirement: Hardware and VRAM Constraint Adherence
 The evaluation harness SHALL execute with gradient calculation disabled (`torch.no_grad()`), supporting `torch.bfloat16` precision, and strictly adhere to a peak GPU VRAM allocation ceiling of 6.0 GB (6144.0 MB).

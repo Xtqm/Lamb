@@ -28,7 +28,7 @@ from jed_m2.browser import (
     PlaywrightBrowserEnvironment,
     PlaywrightStepResult,
 )
-from jed_m2.config import JEDM2Config
+from jed_m2.config import JEDM2Config, JEDM2MediumConfig
 from jed_m2.dataset import (
     AgentTrajectoryDataset,
     InteractionTurn,
@@ -64,7 +64,13 @@ from jed_m2.jepa import (
 from jed_m2.losses import JEDM2CompositeLoss, JEDM2LossConfig
 from jed_m2.mamba import MambaBlock
 from jed_m2.mla import MultiHeadLatentAttention, RMSNorm, RotaryEmbedding
-from jed_m2.model import JEDM2Block, JEDM2Model, JEDM2Output
+from jed_m2.model import (
+    JEDM2Block,
+    JEDM2Model,
+    JEDM2Output,
+    create_jed_m2_medium,
+    create_jed_m2_nano,
+)
 from jed_m2.moe import GELUFeedForward, SparseTop2MoE, SwiGLUFeedForward
 from jed_m2.rl import (
     DPOConfig,
@@ -106,6 +112,7 @@ from jed_m2.vision import (
 
 __all__ = [
     "JEDM2Config",
+    "JEDM2MediumConfig",
     "StandardMHA",
     "DenseSwiGLUFFN",
     "get_baseline_config",
@@ -134,6 +141,8 @@ __all__ = [
     "JEDM2Block",
     "JEDM2Model",
     "JEDM2Output",
+    "create_jed_m2_nano",
+    "create_jed_m2_medium",
     "VisionPatchEncoder",
     "get_2d_sincos_pos_embed",
     "UIElement",

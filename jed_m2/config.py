@@ -55,6 +55,7 @@ class JEDM2Config:
     use_jepa: bool = True  # Enable/disable JEPA Latent World Model
     dense_intermediate_dim: int = 1024  # Intermediate hidden dim for Dense SwiGLU FFN
     mha_head_dim: int = 64  # Per-head dimension for Standard MHA (default: hidden_dim // num_heads = 64)
+    model_size: Literal["nano", "medium"] = "nano"  # Model scale tier (Phase 11)
 
     # Dual-System Action Head parameters
     num_action_types: int = 6  # CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH
@@ -81,3 +82,54 @@ class JEDM2Config:
     def mamba_inner_dim(self) -> int:
         """Expanded inner dimension for Mamba SSM block: expand * hidden_dim."""
         return self.mamba_expand * self.hidden_dim
+
+
+def JEDM2MediumConfig(max_seq_len: int = 2048, **kwargs) -> JEDM2Config:
+    """
+    Factory constructing JED-M2-Medium configuration.
+    Calibrated for ~273M total parameters / ~75M active parameters per token
+    across 6 recurrent layers, 12 heads MLA, and 16 SwiGLU experts on RTX 5060.
+    """
+    params = dict(
+        model_size="medium",
+        hidden_dim=768,
+        num_heads=12,
+        max_seq_len=max_seq_len,
+        vocab_size=8192,
+        q_lora_rank=384,
+        kv_lora_rank=192,
+        qk_rope_head_dim=64,
+        qk_nope_head_dim=32,
+        v_head_dim=64,
+        rope_theta=10000.0,
+        num_experts=16,
+        top_k=2,
+        moe_intermediate_dim=1024,
+        aux_loss_coef=0.01,
+        activation="swiglu",
+        mamba_d_state=16,
+        mamba_d_conv=4,
+        mamba_expand=2,
+        mamba_dt_rank=48,
+        jepa_latent_dim=384,
+        jepa_ema_decay=0.99,
+        jepa_loss_cos_weight=0.5,
+        jepa_action_dim=64,
+        num_layers=6,
+        attn_type="mla",
+        ffn_type="moe",
+        use_mamba=True,
+        use_jepa=True,
+        dense_intermediate_dim=1024,
+        mha_head_dim=64,
+        num_action_types=6,
+        action_dropout=0.1,
+        action_gate_threshold=0.5,
+        image_size=224,
+        patch_size=16,
+        num_channels=3,
+        visual_grounding_heads=4,
+    )
+    params.update(kwargs)
+    return JEDM2Config(**params)
+

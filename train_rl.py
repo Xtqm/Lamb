@@ -16,7 +16,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 import torch
 
-from jed_m2.config import JEDM2Config
+from jed_m2.config import JEDM2Config, JEDM2MediumConfig
 from jed_m2.dataset import SimpleLAMTokenizer
 from jed_m2.environment import WebOSEnvironment, get_default_scenarios
 from jed_m2.model import JEDM2Model
@@ -216,6 +216,13 @@ def parse_args() -> argparse.Namespace:
 
     # Hardware & Performance
     parser.add_argument("--seq_len", type=int, default=1024, help="Maximum sequence length")
+    parser.add_argument(
+        "--model_size",
+        type=str,
+        default="nano",
+        choices=["nano", "medium"],
+        help="Model scale tier: nano (~53M params) or medium (~273M params)",
+    )
     parser.add_argument("--no_checkpointing", action="store_true", help="Disable activation checkpointing")
     parser.add_argument("--device", type=str, default=None, help="Force execution device ('cuda' or 'cpu')")
 
@@ -263,6 +270,7 @@ def main() -> None:
     print("      JED-M2 Large Action Model - Reinforcement Learning Harness")
     print("=" * 80)
     print(f"Algorithm Mode        : {args.mode.upper()}")
+    print(f"Model Scale Tier      : {args.model_size.upper()}")
     print(f"Hardware Device       : {gpu_name} ({device})")
     print(f"Precision             : {dtype}")
     print(f"RL Iterations         : {args.iterations}")
@@ -290,7 +298,10 @@ def main() -> None:
     # --------------------------------------------------------------------------
     # 2. Model & Reference Model Initialization
     # --------------------------------------------------------------------------
-    model_config = JEDM2Config(max_seq_len=args.seq_len)
+    if args.model_size == "medium":
+        model_config = JEDM2MediumConfig(max_seq_len=args.seq_len)
+    else:
+        model_config = JEDM2Config(max_seq_len=args.seq_len)
     tokenizer = SimpleLAMTokenizer(model_config.vocab_size)
 
     # Active trainable policy
