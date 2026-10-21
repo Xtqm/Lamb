@@ -80,6 +80,9 @@ Lamb/
 ├── verify_phase6c.py           # Phase 6C SFT convergence & baseline checkpoint verification test
 ├── verify_phase6d.py           # Phase 6D Multimodal visual grounding & VRAM ceiling test
 ├── verify_phase7.py            # Phase 7 Live Playwright browser environment & action verification test
+├── verify_phase8.py            # Phase 8 Standardized evaluation benchmark harness test
+├── eval_benchmarks.py          # Phase 8 CLI benchmark evaluation & comparative runner
+├── BENCHMARK_REPORT.md         # Phase 8 Automated comparative benchmark report
 ├── openspec/                   # Spec-driven development framework & archived changes
 └── jed_m2/
     ├── __init__.py             # Exports public modules
@@ -98,7 +101,8 @@ Lamb/
     ├── rl_pipeline.py          # Phase 6B Interactive rollout sampler, group advantages & preference pairs
     ├── environment.py          # Phase 6A Simulated Web/OS sandbox environment state machine
     ├── browser.py              # Phase 7 Live browser automation environment via Playwright
-    └── agent.py                # Phase 6A/7 Interactive runtime engine with visual grounding & recurrent rollout
+    ├── agent.py                # Phase 6A/7 Interactive runtime engine with visual grounding & recurrent rollout
+    └── benchmark.py            # Phase 8 Standardized TaskEvaluator, offline replay & online closed-loop harness
 ```
 
 ---
@@ -273,6 +277,29 @@ Lamb/
   - Verified resilient error handling and graceful recovery on connection failures (`ERR_CONNECTION_REFUSED`).
   - Verified closed-loop multimodal agent rollout with visual grounding, rationale generation, coordinate prediction, and zero NaNs/Infs.
   - Peak GPU VRAM allocated: **139.45 MB** (0.14 GB), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit) on NVIDIA GeForce RTX 5060 Laptop GPU in `bfloat16`.
+
+### [DONE] Phase 8: Standardized Evaluation Benchmark Harness
+- [x] Standardized evaluation benchmark module (`jed_m2/benchmark.py`):
+  - `TaskEvaluator`: Computes formal action and trajectory metrics:
+    * Task Success Rate (SR %): Exact task goal completion.
+    * Step Success Rate: Ratio of valid intermediate sub-goals achieved across all turns.
+    * Action Primitive F1: Precision, recall, micro/macro F1 across 6 discrete tool categories (CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH).
+    * Spatial Coordinate Accuracy: Mean Absolute Error (MAE) and tolerance radius ($\epsilon \le 0.05$ Euclidean distance and element bounding box containment).
+    * Trajectory Efficiency Ratio: Length of agent trajectory compared to optimal demonstration ($L_{\text{optimal}} / L_{\text{agent}}$).
+    * Decision Latency: Milliseconds per step and token throughput.
+  - Offline evaluation routine (`evaluate_offline_dataset`): Replaying Mind2Web/WebArena validation/test splits with ground-truth element and coordinate matching.
+  - Online closed-loop evaluation routine (`evaluate_online_environment`): Autonomous multi-turn execution across `WebOSEnvironment` sandboxes and live Playwright sessions.
+- [x] CLI benchmark runner and comparative analyzer (`eval_benchmarks.py`):
+  - Configurable flags: `--benchmark {mind2web,webarena,simulated}`, `--model_path <path>`, `--checkpoints <paths...>`, `--split {val,test}`, `--num_episodes 50`, `--max_steps 15`, `--device {cuda,cpu}`.
+  - Side-by-side comparative evaluation of multiple checkpoints (e.g. SFT baseline vs. RL policies) on identical seeded task splits with automatic CUDA cache clearing.
+  - Clean 7-bit ASCII terminal summary tables and automated Markdown report export (`BENCHMARK_REPORT.md`).
+- [x] Public API exports in `jed_m2/__init__.py`.
+- [x] Implement and execute `verify_phase8.py`:
+  - Verified metric formulas, coordinate tolerance hit testing, and zero-division numerical sanity (zero NaNs/Infs).
+  - Verified offline Mind2Web/WebArena trajectory replay evaluation without live browser dependencies.
+  - Verified online closed-loop multi-turn execution in `WebOSEnvironment`.
+  - Verified side-by-side checkpoint comparative runner, 7-bit ASCII tables, and Markdown report export (`BENCHMARK_REPORT.md`).
+  - Peak GPU VRAM allocated: **243.01 MB** (0.24 GB / 3.96% utilization), strictly complying with and far below the 6.0 GB ceiling (6144.0 MB limit) on NVIDIA GeForce RTX 5060 Laptop GPU in `bfloat16`.
 
 ---
 

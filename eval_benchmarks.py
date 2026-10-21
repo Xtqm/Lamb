@@ -1,0 +1,365 @@
+"""
+CLI Benchmark Runner and Comparative Evaluation Script for JED-M2.
+Provides:
+- Configurable CLI flags:
+  --benchmark {mind2web,webarena,simulated}
+  --model_path <path>
+  --checkpoints <path1> <path2> ...
+  --split {val,test}
+  --num_episodes 50
+  --max_steps 15
+  --device {cuda,cpu}
+  --dtype {bfloat16,float32}
+  --output_report BENCHMARK_REPORT.md
+  --seed 42
+- Side-by-side comparative evaluation of multiple model checkpoints on identical task splits.
+- Clean 7-bit ASCII terminal summary tables.
+- Automated export of formal Markdown benchmark report.
+
+STRICT BUILD RULE: 100% native PyTorch without external compiled C++/CUDA packages.
+"""
+
+import argparse
+import os
+import sys
+import time
+from typing import Dict, List, Optional, Tuple, Union
+import torch
+
+from jed_m2.agent import JEDM2Agent
+from jed_m2.benchmark import (
+    BenchmarkSummary,
+    TaskEvaluator,
+    evaluate_offline_dataset,
+    evaluate_online_environment,
+)
+from jed_m2.config import JEDM2Config
+from jed_m2.dataset import (
+    AgentTrajectoryDataset,
+    SimpleLAMTokenizer,
+    SyntheticTrajectoryGenerator,
+    TrajectorySample,
+)
+from jed_m2.environment import ScenarioDefinition, WebOSEnvironment, get_default_scenarios
+from jed_m2.model import JEDM2Model
+
+
+def parse_args() -> argparse.Namespace:
+    """Parses command-line arguments for benchmark runner."""
+    parser = argparse.ArgumentParser(
+        description="JED-M2 Standardized Benchmark Evaluation Runner & Comparative Analyzer"
+    )
+    parser.add_argument(
+        "--benchmark",
+        type=str,
+        default="simulated",
+        choices=["mind2web", "webarena", "simulated"],
+        help="Target benchmark suite to evaluate: mind2web, webarena, or simulated Web/OS sandbox.",
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default=None,
+        help="Path to a single model checkpoint (.pt).",
+    )
+    parser.add_argument(
+        "--checkpoints",
+        type=str,
+        nargs="+",
+        default=None,
+        help="List of checkpoint paths to evaluate side-by-side (e.g. SFT Base vs GRPO Step 40).",
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="test",
+        choices=["val", "test"],
+        help="Dataset split to evaluate: val or test.",
+    )
+    parser.add_argument(
+        "--num_episodes",
+        type=int,
+        default=50,
+        help="Total number of episodes to evaluate per checkpoint.",
+    )
+    parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=15,
+        help="Maximum interaction turns per episode.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        choices=["cuda", "cpu"],
+        help="Execution hardware device.",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="bfloat16",
+        choices=["bfloat16", "float32"],
+        help="Computation precision.",
+    )
+    parser.add_argument(
+        "--output_report",
+        type=str,
+        default="BENCHMARK_REPORT.md",
+        help="Output Markdown report filename.",
+    )
+    parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.05,
+        help="Spatial coordinate matching tolerance radius (epsilon in [0, 1]).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for deterministic benchmark trajectory generation.",
+    )
+    return parser.parse_args()
+
+
+def load_model(
+    checkpoint_path: Optional[str],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tuple[JEDM2Model, str]:
+    """
+    Loads JEDM2Model from a checkpoint file or creates an initialized baseline model.
+
+    Args:
+        checkpoint_path: Path to checkpoint .pt file or None.
+        device: Hardware device.
+        dtype: PyTorch data type.
+
+    Returns:
+        Tuple of (model, checkpoint_label).
+    """
+    if checkpoint_path is None or checkpoint_path.lower() == "random" or not os.path.exists(checkpoint_path):
+        config = JEDM2Config()
+        model = JEDM2Model(config)
+        label = "Untrained Base" if checkpoint_path is None else os.path.basename(checkpoint_path)
+    else:
+        # Load checkpoint payload
+        data = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if isinstance(data, dict) and "model_config" in data:
+            config = JEDM2Config(**data["model_config"])
+        else:
+            config = JEDM2Config()
+
+        model = JEDM2Model(config)
+        state_dict = data.get("model_state_dict", data) if isinstance(data, dict) else data
+        model.load_state_dict(state_dict)
+        label = os.path.splitext(os.path.basename(checkpoint_path))[0]
+
+    model.to(device=device, dtype=dtype)
+    model.eval()
+    return model, label
+
+
+def create_offline_dataset(
+    benchmark_name: str,
+    split: str,
+    num_episodes: int,
+    seed: int,
+) -> List[TrajectorySample]:
+    """
+    Constructs a deterministic synthetic Mind2Web or WebArena evaluation trajectory dataset.
+
+    Args:
+        benchmark_name: 'mind2web' or 'webarena'.
+        split: 'val' or 'test'.
+        num_episodes: Number of trajectories.
+        seed: Random seed.
+
+    Returns:
+        List of TrajectorySample objects.
+    """
+    config = JEDM2Config()
+    # Vary seed by split to avoid data leakage
+    split_offset = 1000 if split == "val" else 5000
+    generator = SyntheticTrajectoryGenerator(config=config, seed=seed + split_offset)
+
+    dataset: List[TrajectorySample] = []
+    for i in range(num_episodes):
+        sample = generator.generate_trajectory(scenario_idx=i)
+        sample.sample_id = f"{benchmark_name}_{split}_{i}"
+        dataset.append(sample)
+    return dataset
+
+
+def run_benchmark_for_checkpoint(
+    checkpoint_path: Optional[str],
+    benchmark_name: str,
+    split: str,
+    num_episodes: int,
+    max_steps: int,
+    device_str: str,
+    dtype_str: str,
+    tolerance: float,
+    seed: int,
+    offline_trajectories: Optional[List[TrajectorySample]] = None,
+) -> BenchmarkSummary:
+    """
+    Runs benchmark evaluation for a single model checkpoint.
+
+    Args:
+        checkpoint_path: Path to checkpoint file or None.
+        benchmark_name: 'mind2web', 'webarena', or 'simulated'.
+        split: 'val' or 'test'.
+        num_episodes: Total episodes.
+        max_steps: Maximum turns per episode.
+        device_str: 'cuda' or 'cpu'.
+        dtype_str: 'bfloat16' or 'float32'.
+        tolerance: Spatial tolerance radius.
+        seed: Random seed.
+        offline_trajectories: Pre-generated trajectory list if running offline evaluation.
+
+    Returns:
+        BenchmarkSummary for this checkpoint.
+    """
+    device = torch.device(device_str)
+    dtype = torch.bfloat16 if dtype_str == "bfloat16" and "cuda" in device_str else torch.float32
+
+    # Load model
+    model, label = load_model(checkpoint_path, device=device, dtype=dtype)
+    tokenizer = SimpleLAMTokenizer(model.config.vocab_size)
+    agent = JEDM2Agent(model=model, config=model.config, tokenizer=tokenizer, device=device, dtype=dtype)
+    evaluator = TaskEvaluator(tolerance_radius=tolerance)
+
+    if benchmark_name in ("mind2web", "webarena"):
+        # Offline dataset replay
+        if offline_trajectories is None:
+            offline_trajectories = create_offline_dataset(
+                benchmark_name=benchmark_name,
+                split=split,
+                num_episodes=num_episodes,
+                seed=seed,
+            )
+
+        summary = evaluate_offline_dataset(
+            agent=agent,
+            trajectories=offline_trajectories,
+            evaluator=evaluator,
+            benchmark_name=f"{benchmark_name}_{split}",
+            checkpoint_name=label,
+            max_episodes=num_episodes,
+        )
+    else:
+        # Online closed-loop simulation in WebOSEnvironment
+        summary = evaluate_online_environment(
+            agent=agent,
+            evaluator=evaluator,
+            benchmark_name="webos_simulated",
+            checkpoint_name=label,
+            num_episodes=num_episodes,
+            max_steps=max_steps,
+            seed=seed,
+        )
+
+    # Clean up model and clear GPU cache
+    del agent, model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return summary
+
+
+def main():
+    """Main CLI execution entrypoint."""
+    args = parse_args()
+
+    # Determine checkpoint list
+    checkpoints: List[Optional[str]] = []
+    if args.checkpoints:
+        checkpoints.extend(args.checkpoints)
+    elif args.model_path:
+        checkpoints.append(args.model_path)
+    else:
+        # Default fallback: check if baseline SFT checkpoint exists
+        default_sft = os.path.join("checkpoints", "jed_m2_sft_base.pt")
+        if os.path.exists(default_sft):
+            checkpoints.append(default_sft)
+        else:
+            checkpoints.append(None)
+
+    print("=" * 80)
+    print(" JED-M2 Large Action Model - Benchmark Evaluation Suite".center(80))
+    print("=" * 80)
+    print(f"Benchmark Suite : {args.benchmark} (split={args.split})")
+    print(f"Episodes        : {args.num_episodes}")
+    print(f"Max Steps/Ep    : {args.max_steps}")
+    print(f"Device          : {args.device} (dtype={args.dtype})")
+    print(f"Tolerance Radius: {args.tolerance}")
+    print(f"Checkpoints ({len(checkpoints)}):")
+    for cp in checkpoints:
+        print(f"  - {cp if cp else '[Untrained Baseline]'}")
+    print("=" * 80)
+
+    # If offline dataset, pre-generate once so all checkpoints are tested on identical episodes
+    offline_trajectories: Optional[List[TrajectorySample]] = None
+    if args.benchmark in ("mind2web", "webarena"):
+        print(f"Pre-generating {args.num_episodes} {args.benchmark} ({args.split}) trajectory episodes...")
+        offline_trajectories = create_offline_dataset(
+            benchmark_name=args.benchmark,
+            split=args.split,
+            num_episodes=args.num_episodes,
+            seed=args.seed,
+        )
+        print("Dataset ready.\n")
+
+    summaries: List[BenchmarkSummary] = []
+
+    for idx, cp in enumerate(checkpoints):
+        label = os.path.basename(cp) if cp else f"Baseline #{idx+1}"
+        print(f"[{idx+1}/{len(checkpoints)}] Evaluating: {label}...")
+        t_start = time.perf_counter()
+
+        summary = run_benchmark_for_checkpoint(
+            checkpoint_path=cp,
+            benchmark_name=args.benchmark,
+            split=args.split,
+            num_episodes=args.num_episodes,
+            max_steps=args.max_steps,
+            device_str=args.device,
+            dtype_str=args.dtype,
+            tolerance=args.tolerance,
+            seed=args.seed,
+            offline_trajectories=offline_trajectories,
+        )
+        elapsed = time.perf_counter() - t_start
+        print(
+            f"  -> Done in {elapsed:.2f}s | SR: {summary.task_success_rate:.1f}% | "
+            f"Step SR: {summary.mean_step_success_rate:.3f} | Latency: {summary.mean_decision_latency_ms:.1f}ms\n"
+        )
+        summaries.append(summary)
+
+    # Render ASCII Summary Table
+    print("\n" + "=" * 80)
+    ascii_table = TaskEvaluator.format_ascii_table(
+        summaries,
+        title=f"JED-M2 BENCHMARK: {args.benchmark.upper()} ({args.split.upper()})",
+    )
+    print(ascii_table)
+    print("=" * 80 + "\n")
+
+    # Export Markdown Report
+    if args.output_report:
+        notes = (
+            f"Evaluated on {args.num_episodes} episodes with max_steps={args.max_steps} "
+            f"and spatial tolerance epsilon={args.tolerance} on device={args.device}."
+        )
+        saved_path = TaskEvaluator.export_markdown_report(
+            summaries=summaries,
+            output_path=args.output_report,
+            notes=notes,
+        )
+        print(f"Benchmark report exported successfully to: {os.path.abspath(args.output_report)}")
+
+
+if __name__ == "__main__":
+    main()

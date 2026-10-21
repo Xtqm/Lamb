@@ -7,6 +7,14 @@ from jed_m2.agent import (
     JEDM2Agent,
     TurnRecord,
 )
+from jed_m2.benchmark import (
+    BenchmarkSummary,
+    EpisodeMetric,
+    StepMetric,
+    TaskEvaluator,
+    evaluate_offline_dataset,
+    evaluate_online_environment,
+)
 from jed_m2.browser import (
     PlaywrightBrowserEnvironment,
     PlaywrightStepResult,
@@ -133,4 +141,10 @@ __all__ = [
     "TrajectoryRolloutSampler",
     "RolloutTrajectory",
     "RolloutTurn",
+    "StepMetric",
+    "EpisodeMetric",
+    "BenchmarkSummary",
+    "TaskEvaluator",
+    "evaluate_offline_dataset",
+    "evaluate_online_environment",
 ]
