@@ -128,6 +128,23 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Random seed for deterministic benchmark trajectory generation.",
     )
+    parser.add_argument(
+        "--use_jepa_planning",
+        action="store_true",
+        help="Enable active JEPA model-predictive latent rollout planning in agent decision loop.",
+    )
+    parser.add_argument(
+        "--jepa_lambda",
+        type=float,
+        default=1.0,
+        help="Planning distance penalty factor lambda for candidate action scoring.",
+    )
+    parser.add_argument(
+        "--raw_mind2web_dir",
+        type=str,
+        default="data/raw_mind2web",
+        help="Path to directory containing raw Mind2Web task annotations and DOM snapshots.",
+    )
     return parser.parse_args()
 
 
@@ -257,6 +274,7 @@ def load_real_web_dataset(
     split: str,
     num_episodes: int,
     seed: int,
+    raw_mind2web_dir: Optional[str] = "data/raw_mind2web",
 ) -> List[Any]:
     """
     Loads deterministic real-world web interaction trajectory episodes from RealWebTrajectoryDataset.
@@ -265,6 +283,7 @@ def load_real_web_dataset(
         split: 'val' or 'test'.
         num_episodes: Number of trajectories.
         seed: Random seed.
+        raw_mind2web_dir: Directory containing raw Mind2Web tasks and snapshots.
 
     Returns:
         List of RealWebTrajectorySample objects.
@@ -273,7 +292,8 @@ def load_real_web_dataset(
     dataset = RealWebTrajectoryDataset(
         config=config,
         split=split,
-        dataset_size=max(num_episodes, 500),
+        dataset_size=max(num_episodes, 20),
+        raw_mind2web_dir=raw_mind2web_dir,
         seed=seed,
     )
     return dataset.samples[:num_episodes]
@@ -291,6 +311,9 @@ def run_benchmark_for_checkpoint(
     seed: int,
     offline_trajectories: Optional[List[Any]] = None,
     model_size: str = "nano",
+    use_jepa_planning: bool = False,
+    jepa_lambda: float = 1.0,
+    raw_mind2web_dir: Optional[str] = "data/raw_mind2web",
 ) -> BenchmarkSummary:
     """
     Runs benchmark evaluation for a single model checkpoint.
@@ -307,6 +330,9 @@ def run_benchmark_for_checkpoint(
         seed: Random seed.
         offline_trajectories: Pre-generated trajectory list if running offline evaluation.
         model_size: Model size tier ('nano' or 'medium').
+        use_jepa_planning: Enable active model-predictive JEPA planning.
+        jepa_lambda: Planning distance penalty weight.
+        raw_mind2web_dir: Directory containing raw Mind2Web data.
 
     Returns:
         BenchmarkSummary for this checkpoint.
@@ -317,27 +343,36 @@ def run_benchmark_for_checkpoint(
     # Load model
     model, label = load_model(checkpoint_path, device=device, dtype=dtype, model_size=model_size)
     tokenizer = SimpleLAMTokenizer(model.config.vocab_size)
-    agent = JEDM2Agent(model=model, config=model.config, tokenizer=tokenizer, device=device, dtype=dtype)
+    agent = JEDM2Agent(
+        model=model,
+        config=model.config,
+        tokenizer=tokenizer,
+        device=device,
+        dtype=dtype,
+        use_jepa_planning=use_jepa_planning,
+        jepa_planning_lambda=jepa_lambda,
+    )
     evaluator = TaskEvaluator(tolerance_radius=tolerance)
 
-    if benchmark_name == "real_web":
+    if benchmark_name in ("real_web", "mind2web"):
         # Real-world HTML DOM trajectory replay
         if offline_trajectories is None:
             offline_trajectories = load_real_web_dataset(
                 split=split,
                 num_episodes=num_episodes,
                 seed=seed,
+                raw_mind2web_dir=raw_mind2web_dir,
             )
 
         summary = evaluate_offline_dataset(
             agent=agent,
             trajectories=offline_trajectories,
             evaluator=evaluator,
-            benchmark_name=f"real_web_{split}",
+            benchmark_name=f"{benchmark_name}_{split}",
             checkpoint_name=label,
             max_episodes=num_episodes,
         )
-    elif benchmark_name in ("mind2web", "webarena"):
+    elif benchmark_name == "webarena":
         # Offline dataset replay
         if offline_trajectories is None:
             offline_trajectories = create_offline_dataset(
@@ -408,15 +443,16 @@ def main():
 
     # If offline dataset, pre-generate once so all checkpoints are tested on identical episodes
     offline_trajectories: Optional[List[Any]] = None
-    if args.benchmark == "real_web":
-        print(f"Pre-loading {args.num_episodes} real-world web ({args.split}) trajectory episodes...")
+    if args.benchmark in ("real_web", "mind2web"):
+        print(f"Pre-loading {args.num_episodes} real-world web / Mind2Web ({args.split}) trajectory episodes...")
         offline_trajectories = load_real_web_dataset(
             split=args.split,
             num_episodes=args.num_episodes,
             seed=args.seed,
+            raw_mind2web_dir=args.raw_mind2web_dir,
         )
-        print(f"Real web dataset ready: {len(offline_trajectories)} episodes.\n")
-    elif args.benchmark in ("mind2web", "webarena"):
+        print(f"Real web / Mind2Web dataset ready: {len(offline_trajectories)} episodes.\n")
+    elif args.benchmark == "webarena":
         print(f"Pre-generating {args.num_episodes} {args.benchmark} ({args.split}) trajectory episodes...")
         offline_trajectories = create_offline_dataset(
             benchmark_name=args.benchmark,
@@ -445,6 +481,9 @@ def main():
             seed=args.seed,
             offline_trajectories=offline_trajectories,
             model_size=args.model_size,
+            use_jepa_planning=args.use_jepa_planning,
+            jepa_lambda=args.jepa_lambda,
+            raw_mind2web_dir=args.raw_mind2web_dir,
         )
         elapsed = time.perf_counter() - t_start
         print(

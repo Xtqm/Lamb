@@ -15,6 +15,48 @@ import torch.nn.functional as F
 from jed_m2.config import JEDM2Config
 
 
+def parallel_associative_scan(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """
+    Pure-PyTorch parallel associative prefix scan (Blelloch / tree-based scan)
+    for first-order linear state space recurrence:
+        h_t = a_t ⊙ h_{t-1} + b_t  with h_{-1} = 0.
+
+    The associative binary operator • on affine pairs (a_1, b_1) • (a_2, b_2) is:
+        (a_1, b_1) • (a_2, b_2) = (a_2 ⊙ a_1, a_2 ⊙ b_1 + b_2).
+
+    Executes in O(log2 L) parallel tensor steps, reducing Python-to-GPU kernel
+    launches from L to ceil(log2 L) without external C++/CUDA/Triton binaries.
+
+    Args:
+        a: State transition decay multiplier tensor of shape [B, L, d_inner, d_state].
+        b: State input update tensor of shape [B, L, d_inner, d_state].
+
+    Returns:
+        h: Full sequence hidden state trajectory of shape [B, L, d_inner, d_state].
+    """
+    seq_len = a.size(1)
+    if seq_len <= 1:
+        return b
+
+    curr_a = a
+    curr_b = b
+    k = 1
+    while k < seq_len:
+        a_left = curr_a[:, :-k]
+        b_left = curr_b[:, :-k]
+        a_right = curr_a[:, k:]
+        b_right = curr_b[:, k:]
+
+        new_a = a_right * a_left
+        new_b = a_right * b_left + b_right
+
+        curr_a = torch.cat([curr_a[:, :k], new_a], dim=1)
+        curr_b = torch.cat([curr_b[:, :k], new_b], dim=1)
+        k *= 2
+
+    return curr_b
+
+
 class MambaBlock(nn.Module):
     """
     Pure PyTorch Mamba Selective State Space Model (SSM) Block.
@@ -138,36 +180,72 @@ class MambaBlock(nn.Module):
         # B̄ = Δ ⊙ B -> [B, L, d_inner, d_state]
         B_bar = delta_f.unsqueeze(-1) * B_f.unsqueeze(2)
 
-        # Selective Scan Recurrence
-        # h_t = Ā_t ⊙ h_{t-1} + B̄_t ⊙ u_conv,t
+        # Parallel Associative Scan (log-depth prefix scan in pure PyTorch):
+        # b_t = B̄_t ⊙ u_conv,t -> [B, L, d_inner, d_state]
+        b = B_bar * u_conv_f.unsqueeze(-1)
+        h = parallel_associative_scan(A_bar, b)  # [B, L, d_inner, d_state]
+
+        # Vectorized output projection across sequence dimension:
         # y_t = (h_t · C_t) + D ⊙ u_conv,t
-        h = torch.zeros(
-            batch_size, self.d_inner, self.d_state,
-            device=x.device, dtype=torch.float32
-        )
-        y_list = []
-        D_f = self.D.float()  # [d_inner]
-
-        for t in range(seq_len):
-            A_bar_t = A_bar[:, t]  # [B, d_inner, d_state]
-            B_bar_t = B_bar[:, t]  # [B, d_inner, d_state]
-            u_t = u_conv_f[:, t].unsqueeze(-1)  # [B, d_inner, 1]
-            C_t = C_f[:, t].unsqueeze(1)  # [B, 1, d_state]
-
-            # Recurrent state update: [B, d_inner, d_state]
-            h = A_bar_t * h + B_bar_t * u_t
-
-            # Output projection at time t: [B, d_inner]
-            y_t = (h * C_t).sum(dim=-1) + D_f * u_conv_f[:, t]
-            y_list.append(y_t)
-
-        # Stack over sequence dimension: [B, L, d_inner]
-        y = torch.stack(y_list, dim=1).to(dtype=x.dtype)
+        D_f = self.D.float().unsqueeze(0).unsqueeze(0)  # [1, 1, d_inner]
+        y = (h * C_f.unsqueeze(2)).sum(dim=-1) + D_f * u_conv_f
+        y = y.to(dtype=x.dtype)
 
         # Gated combination with z: y ⊙ silu(z)
         y = y * F.silu(z)
 
         # Final out-projection: [B, L, d_inner] -> [B, L, D]
+        out = self.out_proj(y)
+        return out
+
+    def forward_sequential(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Reference sequential implementation of forward pass using Python for-loop.
+        Used strictly for mathematical parity verification and debugging.
+        """
+        batch_size, seq_len, d_model = x.shape
+        xz = self.in_proj(x)
+        u, z = xz.chunk(2, dim=-1)
+
+        u_conv_in = u.transpose(1, 2)
+        u_conv_padded = F.pad(u_conv_in, (self.d_conv - 1, 0))
+        u_conv = self.conv1d(u_conv_padded)
+        u_conv = F.silu(u_conv).transpose(1, 2)
+
+        x_dbl = self.x_proj(u_conv)
+        delta_raw, B_proj, C_proj = torch.split(
+            x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1
+        )
+        delta = F.softplus(self.dt_proj(delta_raw))
+
+        A = -torch.exp(self.A_log.float())
+        delta_f = delta.float()
+        u_conv_f = u_conv.float()
+        B_f = B_proj.float()
+        C_f = C_proj.float()
+
+        deltaA = delta_f.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0)
+        A_bar = torch.exp(deltaA)
+        B_bar = delta_f.unsqueeze(-1) * B_f.unsqueeze(2)
+
+        h = torch.zeros(
+            batch_size, self.d_inner, self.d_state,
+            device=x.device, dtype=torch.float32
+        )
+        y_list = []
+        D_f = self.D.float()
+
+        for t in range(seq_len):
+            A_bar_t = A_bar[:, t]
+            B_bar_t = B_bar[:, t]
+            u_t = u_conv_f[:, t].unsqueeze(-1)
+            C_t = C_f[:, t].unsqueeze(1)
+            h = A_bar_t * h + B_bar_t * u_t
+            y_t = (h * C_t).sum(dim=-1) + D_f * u_conv_f[:, t]
+            y_list.append(y_t)
+
+        y = torch.stack(y_list, dim=1).to(dtype=x.dtype)
+        y = y * F.silu(z)
         out = self.out_proj(y)
         return out
 

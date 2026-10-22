@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 import hashlib
 from html.parser import HTMLParser
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -29,6 +30,9 @@ from torch.utils.data import Dataset
 from jed_m2.config import JEDM2Config
 from jed_m2.dataset import SimpleLAMTokenizer, TrajectoryBatch
 from jed_m2.heads import ActionType
+
+
+logger = logging.getLogger("jed_m2.real_dataset")
 
 
 # ==============================================================================
@@ -540,12 +544,34 @@ class RealWebTrajectoryDataset(Dataset):
         },
     ]
 
+    @staticmethod
+    def compute_obs_features(obs_text: str, elements: List[InteractiveElement], hidden_dim: int) -> torch.Tensor:
+        """Deterministic semantic observation embedding for JEPA world model."""
+        obs_words = obs_text.split()
+        obs_features = torch.zeros(hidden_dim, dtype=torch.float32)
+        for w_idx, word in enumerate(obs_words):
+            w_hash = int(hashlib.md5(word.encode("utf-8")).hexdigest()[:8], 16)
+            dim_idx = w_hash % hidden_dim
+            weight = 1.0 / (1.0 + (w_idx % 32) * 0.05)
+            obs_features[dim_idx] += weight
+        for el in elements:
+            if el.center:
+                cx_dim = int(el.center[0] * (hidden_dim - 1))
+                cy_dim = int(el.center[1] * (hidden_dim - 1))
+                obs_features[cx_dim] += 0.5
+                obs_features[cy_dim] += 0.5
+        f_norm = obs_features.norm(p=2)
+        if f_norm > 1e-6:
+            obs_features = obs_features / f_norm
+        return obs_features
+
     def __init__(
         self,
         config: JEDM2Config,
         split: str = "train",
         dataset_size: int = 1000,
         cache_dir: str = "data/real_trajectories_cache",
+        raw_mind2web_dir: Optional[str] = "data/raw_mind2web",
         force_rebuild: bool = False,
         seed: int = 42,
     ):
@@ -554,6 +580,7 @@ class RealWebTrajectoryDataset(Dataset):
         self.split = split
         self.dataset_size = dataset_size
         self.cache_dir = Path(cache_dir)
+        self.raw_mind2web_dir = Path(raw_mind2web_dir) if raw_mind2web_dir is not None else None
         self.seed = seed
         self.hidden_dim = config.hidden_dim
 
@@ -562,7 +589,13 @@ class RealWebTrajectoryDataset(Dataset):
 
     def _get_cache_path(self) -> Path:
         os.makedirs(self.cache_dir, exist_ok=True)
-        return self.cache_dir / f"real_web_trajectories_{self.split}_{self.dataset_size}_h{self.hidden_dim}_seed{self.seed}.pt"
+        has_m2w = False
+        if self.raw_mind2web_dir:
+            raw_split_dir = self.raw_mind2web_dir / self.split
+            if raw_split_dir.exists() and list(raw_split_dir.glob("task_*.json")):
+                has_m2w = True
+        prefix = "mind2web" if has_m2w else "mock"
+        return self.cache_dir / f"real_web_{prefix}_{self.split}_{self.dataset_size}_h{self.hidden_dim}_seed{self.seed}.pt"
 
     def _init_dataset(self, force_rebuild: bool = False):
         cache_path = self._get_cache_path()
@@ -575,7 +608,7 @@ class RealWebTrajectoryDataset(Dataset):
             except Exception:
                 pass
 
-        # Build dataset from real/offline trajectory templates
+        # Build dataset from real Mind2Web corpus or fallback templates
         self.samples = self._generate_split_samples()
 
         # Save to persistent disk cache
@@ -585,7 +618,141 @@ class RealWebTrajectoryDataset(Dataset):
             pass
 
     def _generate_split_samples(self) -> List[RealWebTrajectorySample]:
-        """Generates stratified trajectory samples from real offline trace templates."""
+        """Generates stratified trajectory samples from real Mind2Web or offline templates."""
+        if self.raw_mind2web_dir:
+            raw_split_dir = self.raw_mind2web_dir / self.split
+            if raw_split_dir.exists():
+                task_files = sorted(list(raw_split_dir.glob("task_*.json")))
+                if task_files:
+                    logger.info("Ingesting %d real Mind2Web tasks from %s", len(task_files), raw_split_dir)
+                    return self._generate_from_mind2web(raw_split_dir, task_files)
+
+        logger.info(
+            "Raw Mind2Web corpus not found in %s/%s. Falling back to deterministic procedural HTML trace templates.",
+            self.raw_mind2web_dir, self.split
+        )
+        return self._generate_from_templates()
+
+    def _generate_from_mind2web(
+        self, raw_split_dir: Path, task_files: List[Path]
+    ) -> List[RealWebTrajectorySample]:
+        """Parses genuine Mind2Web task annotations and HTML DOM snapshots."""
+        samples: List[RealWebTrajectorySample] = []
+        num_tasks = len(task_files)
+
+        for i in range(self.dataset_size):
+            task_idx = (self.seed + i) % num_tasks
+            task_path = task_files[task_idx]
+
+            try:
+                with open(task_path, "r", encoding="utf-8") as f:
+                    task_data = json.load(f)
+            except Exception as e:
+                logger.warning("Failed to load task file %s: %s", task_path, e)
+                continue
+
+            ann_id = task_data.get("annotation_id", f"task_{i:04d}")
+            sample_id = f"m2w_{self.split}_{i:05d}_{ann_id}"
+            domain = task_data.get("domain", task_data.get("website", "web"))
+            goal = task_data.get("confirmed_task", "Complete web interaction")
+            turns: List[RealWebInteractionTurn] = []
+
+            actions = task_data.get("actions", [])
+            for turn_idx, act_info in enumerate(actions):
+                # Retrieve HTML code from snapshot file or action object
+                html_code = ""
+                dom_file = act_info.get("dom_snapshot_file")
+                if dom_file and (raw_split_dir / dom_file).exists():
+                    try:
+                        html_code = (raw_split_dir / dom_file).read_text(encoding="utf-8")
+                    except Exception:
+                        html_code = ""
+                if not html_code:
+                    html_code = act_info.get("cleaned_html", "<html><body><button id='action-btn' bbox='[100,100,200,150]'>Action</button></body></html>")
+
+                elements, _ = FastDOMParser.parse_html(html_code, max_elements=64)
+                obs_dom_strs = [el.to_dom_string() for el in elements]
+                url_str = act_info.get("url", "https://web.archive.org")
+                obs_text = f"URL: {url_str} | DOM: " + " ".join(obs_dom_strs)
+
+                obs_features = self.compute_obs_features(obs_text, elements, self.hidden_dim)
+
+                # Target coordinates and bounding box
+                raw_bbox = act_info.get("target_bounding_box") or act_info.get("bbox")
+                if not raw_bbox and "target_element" in act_info:
+                    raw_bbox = act_info["target_element"].get("bbox")
+                if not raw_bbox:
+                    raw_bbox = (100.0, 100.0, 200.0, 150.0)
+
+                norm_box = normalize_bbox(raw_bbox)
+                cx = (norm_box[0] + norm_box[2]) / 2.0
+                cy = (norm_box[1] + norm_box[3]) / 2.0
+
+                # Action type mapping
+                op_dict = act_info.get("operation", {})
+                op_str = op_dict.get("op", "CLICK").upper() if isinstance(op_dict, dict) else str(op_dict).upper()
+                if "CLICK" in op_str or "SELECT" in op_str:
+                    action_type = ActionType.CLICK
+                elif "TYPE" in op_str or "ENTER" in op_str or "INPUT" in op_str:
+                    action_type = ActionType.TYPE
+                elif "SCROLL" in op_str:
+                    action_type = ActionType.SCROLL
+                elif "NAV" in op_str:
+                    action_type = ActionType.NAVIGATE
+                elif "FINISH" in op_str or "COMPLETE" in op_str:
+                    action_type = ActionType.FINISH
+                else:
+                    action_type = ActionType.CLICK
+
+                # Argument
+                arg_val = op_dict.get("value", "") if isinstance(op_dict, dict) else ""
+                argument = str(arg_val) if arg_val is not None else ""
+
+                # Target element matching
+                target_id = None
+                min_dist = float("inf")
+                for el in elements:
+                    x1, y1, x2, y2 = el.bbox
+                    if x1 <= cx <= x2 and y1 <= cy <= y2:
+                        target_id = el.element_id
+                        break
+                    el_cx, el_cy = el.center
+                    dist = (el_cx - cx) ** 2 + (el_cy - cy) ** 2
+                    if dist < min_dist:
+                        min_dist = dist
+                        target_id = el.element_id
+
+                thought = act_info.get("thought", f"Execute {action_type.name} at coordinates ({cx:.2f}, {cy:.2f})")
+
+                turn = RealWebInteractionTurn(
+                    turn_id=turn_idx,
+                    url=url_str,
+                    interactive_elements=elements,
+                    obs_text=obs_text,
+                    obs_features=obs_features,
+                    thought=thought,
+                    action_type=action_type,
+                    coordinates=(cx, cy),
+                    argument=argument,
+                    target_element_id=target_id,
+                    reward=1.0 if turn_idx == len(actions) - 1 else 0.0,
+                )
+                turns.append(turn)
+
+            sample = RealWebTrajectorySample(
+                sample_id=sample_id,
+                domain=domain,
+                goal=goal,
+                turns=turns,
+                split=self.split,
+                total_reward=1.0,
+            )
+            samples.append(sample)
+
+        return samples
+
+    def _generate_from_templates(self) -> List[RealWebTrajectorySample]:
+        """Generates stratified trajectory samples from procedural HTML trace templates."""
         samples: List[RealWebTrajectorySample] = []
         num_templates = len(self.MOCK_TRACE_TEMPLATES)
 
@@ -613,24 +780,7 @@ class RealWebTrajectoryDataset(Dataset):
                 obs_dom_strs = [el.to_dom_string() for el in elements]
                 obs_text = f"URL: {t_data['url']} | DOM: " + " ".join(obs_dom_strs)
 
-                # Deterministic semantic observation embedding for JEPA world model
-                # Project DOM structure, element tokens, and URL tokens into hidden_dim
-                obs_words = obs_text.split()
-                obs_features = torch.zeros(self.hidden_dim, dtype=torch.float32)
-                for w_idx, word in enumerate(obs_words):
-                    w_hash = int(hashlib.md5(word.encode("utf-8")).hexdigest()[:8], 16)
-                    dim_idx = w_hash % self.hidden_dim
-                    weight = 1.0 / (1.0 + (w_idx % 32) * 0.05)
-                    obs_features[dim_idx] += weight
-                for el in elements:
-                    if el.center:
-                        cx_dim = int(el.center[0] * (self.hidden_dim - 1))
-                        cy_dim = int(el.center[1] * (self.hidden_dim - 1))
-                        obs_features[cx_dim] += 0.5
-                        obs_features[cy_dim] += 0.5
-                f_norm = obs_features.norm(p=2)
-                if f_norm > 1e-6:
-                    obs_features = obs_features / f_norm
+                obs_features = self.compute_obs_features(obs_text, elements, self.hidden_dim)
 
                 # Target coordinates
                 raw_bbox = t_data["target_bbox"]

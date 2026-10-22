@@ -52,3 +52,13 @@ Thumbs.db
 FUTURE_PHASES_PROPOSALS.md
 *.tmp.md
 
+# Mind2Web & Real Web Trajectory Datasets and Caches (Phase 14)
+data/raw_mind2web/
+data/*.parquet
+data/*_cache/
+data/cache/
+*.parquet
+*.parquet.gzip
+data/raw_snapshots/
+
+

@@ -1,19 +1,19 @@
 # JED-M2 Large Action Model - Benchmark Evaluation Report
 
-**Generated:** 2026-10-22 03:57:46 UTC  
+**Generated:** 2026-10-22 16:06:34 UTC  
 **Benchmark Domain:** `mind2web_test`  
 **Evaluation Device:** `cuda`  
 
 ---
 
 ### Context & Notes
-Evaluated on 20 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on device=cuda.
+Evaluated on 2 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on device=cuda.
 
 ## 1. Comparative Performance Summary
 
 | Checkpoint | Episodes | Task SR (%) | Step SR | Macro F1 | Micro F1 | Coord MAE | Coord Tol Acc (eps<=0.05) | Efficiency Ratio | Latency (ms/step) | Throughput (tok/s) | Peak VRAM (MB) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **jed_m2_medium_step_500** | 20 | 0.00% | 0.4017 | 0.0973 | 0.4123 | 0.3004 | 0.0000 | 0.0000 | 1659.88 ms | 29.5 | 571.1 MB |
+| **jed_m2_sft_base** | 2 | 0.00% | 0.0000 | 0.5000 | 0.0000 | 0.1946 | 0.0000 | 0.0000 | 373.71 ms | 51.8 | 134.8 MB |
 
 ---
 
@@ -21,7 +21,7 @@ Evaluated on 20 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on
 
 | Checkpoint | CLICK | TYPE | SCROLL | NAVIGATE | API_CALL | FINISH |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **jed_m2_medium_step_500** | 0.584 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| **jed_m2_sft_base** | 0.000 | 0.000 | 1.000 | 1.000 | 1.000 | 0.000 |
 
 ---
 
