@@ -452,9 +452,12 @@ class TrajectoryBatch:
             if self.images is not None
             else None
         )
+        attn_mask_tensor = self.attention_mask.to(device=device)
+        if dtype is not None and attn_mask_tensor.is_floating_point():
+            attn_mask_tensor = attn_mask_tensor.to(dtype=dtype)
         return TrajectoryBatch(
             input_ids=self.input_ids.to(device=device),
-            attention_mask=self.attention_mask.to(device=device),
+            attention_mask=attn_mask_tensor,
             labels=self.labels.to(device=device),
             reason_loss_mask=self.reason_loss_mask.to(device=device),
             action_indices=self.action_indices.to(device=device),

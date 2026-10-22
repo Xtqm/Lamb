@@ -72,6 +72,15 @@ from jed_m2.model import (
     create_jed_m2_nano,
 )
 from jed_m2.moe import GELUFeedForward, SparseTop2MoE, SwiGLUFeedForward
+from jed_m2.real_dataset import (
+    FastDOMParser,
+    InteractiveElement,
+    RealTrajectoryCollator,
+    RealWebInteractionTurn,
+    RealWebTrajectoryDataset,
+    RealWebTrajectorySample,
+    normalize_bbox,
+)
 from jed_m2.rl import (
     DPOConfig,
     DPOTrainer,
@@ -196,4 +205,11 @@ __all__ = [
     "DynamicWebBrowserEnvironment",
     "apply_bbox_jitter",
     "generate_distractor_elements",
+    "FastDOMParser",
+    "InteractiveElement",
+    "normalize_bbox",
+    "RealWebInteractionTurn",
+    "RealWebTrajectorySample",
+    "RealWebTrajectoryDataset",
+    "RealTrajectoryCollator",
 ]
