@@ -156,15 +156,32 @@ def load_model(
     else:
         # Load checkpoint payload
         data = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        if isinstance(data, dict) and "model_config" in data:
-            config = JEDM2Config(**data["model_config"])
-        elif model_size == "medium":
-            config = JEDM2MediumConfig()
-        else:
-            config = JEDM2Config()
-
-        model = JEDM2Model(config)
         state_dict = data.get("model_state_dict", data) if isinstance(data, dict) else data
+
+        # Robustly auto-detect model architecture from metadata, path, or tensor dimensions
+        detected_size = model_size
+        if isinstance(data, dict):
+            if data.get("model_size") in ("nano", "medium"):
+                detected_size = data["model_size"]
+            elif "model_config" in data and isinstance(data["model_config"], dict):
+                if data["model_config"].get("hidden_dim") == 768 or data["model_config"].get("num_layers") == 16:
+                    detected_size = "medium"
+            elif "config" in data and isinstance(data["config"], dict):
+                if data["config"].get("hidden_dim") == 768 or data["config"].get("num_layers") == 16:
+                    detected_size = "medium"
+
+        if "medium" in str(checkpoint_path).lower():
+            detected_size = "medium"
+        elif "nano" in str(checkpoint_path).lower():
+            detected_size = "nano"
+        elif isinstance(state_dict, dict) and "tok_embeddings.weight" in state_dict:
+            if state_dict["tok_embeddings.weight"].shape[-1] == 768:
+                detected_size = "medium"
+            elif state_dict["tok_embeddings.weight"].shape[-1] == 512:
+                detected_size = "nano"
+
+        config = JEDM2MediumConfig() if detected_size == "medium" else JEDM2Config()
+        model = JEDM2Model(config)
         model_keys = set(model.state_dict().keys())
         ckpt_keys = set(state_dict.keys())
 

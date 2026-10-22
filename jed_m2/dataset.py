@@ -331,10 +331,23 @@ class SyntheticTrajectoryGenerator:
             obs_text = f"Goal: {goal} | Screen State: {dom_str}"
 
             # Continuous observation embedding [hidden_dim] for JEPA world model
-            # Generated deterministically based on turn and sample seed for stability
-            turn_seed = int(hashlib.md5(f"{sample_id}_{turn_idx}".encode()).hexdigest()[:8], 16)
-            gen = torch.Generator().manual_seed(turn_seed)
-            obs_features = torch.randn(self.hidden_dim, generator=gen)
+            # Derived deterministically from DOM elements and observation structure
+            obs_words = obs_text.split()
+            obs_features = torch.zeros(self.hidden_dim, dtype=torch.float32)
+            for w_idx, word in enumerate(obs_words):
+                w_hash = int(hashlib.md5(word.encode("utf-8")).hexdigest()[:8], 16)
+                dim_idx = w_hash % self.hidden_dim
+                weight = 1.0 / (1.0 + (w_idx % 32) * 0.05)
+                obs_features[dim_idx] += weight
+            for el in dom_elements[:6]:
+                if el.center:
+                    cx_dim = int(el.center[0] * (self.hidden_dim - 1))
+                    cy_dim = int(el.center[1] * (self.hidden_dim - 1))
+                    obs_features[cx_dim] += 0.5
+                    obs_features[cy_dim] += 0.5
+            f_norm = obs_features.norm(p=2)
+            if f_norm > 1e-6:
+                obs_features = obs_features / f_norm
 
             # Target coordinates
             if act_type in (ActionType.CLICK, ActionType.TYPE):

@@ -265,6 +265,11 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
 
             optimizer.step()
             scheduler.step()
+
+            # Apply Polyak momentum update to JEPA target encoder (EMA rule)
+            if hasattr(model, "jepa") and model.jepa is not None:
+                model.jepa.update_target_network()
+
             optimizer.zero_grad(set_to_none=True)
             global_step += 1
 

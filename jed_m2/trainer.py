@@ -283,6 +283,11 @@ class JEDM2Trainer:
 
             self.optimizer.step()
             self.scheduler.step()
+
+            # Apply Polyak momentum update to JEPA target encoder (EMA rule)
+            if hasattr(self.model, "jepa") and self.model.jepa is not None:
+                self.model.jepa.update_target_network()
+
             self.optimizer.zero_grad(set_to_none=True)
             self.global_step += 1
 

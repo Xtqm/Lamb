@@ -608,11 +608,24 @@ class RealWebTrajectoryDataset(Dataset):
                 obs_dom_strs = [el.to_dom_string() for el in elements]
                 obs_text = f"URL: {t_data['url']} | DOM: " + " ".join(obs_dom_strs)
 
-                # Generate deterministic observation feature for JEPA world model
-                # Hash turn text into pseudo-random features
-                hash_val = int(hashlib.md5(f"{sample_id}_{turn_idx}".encode()).hexdigest(), 16)
-                gen = torch.Generator().manual_seed(hash_val % (2**31))
-                obs_features = torch.randn(self.hidden_dim, generator=gen)
+                # Deterministic semantic observation embedding for JEPA world model
+                # Project DOM structure, element tokens, and URL tokens into hidden_dim
+                obs_words = obs_text.split()
+                obs_features = torch.zeros(self.hidden_dim, dtype=torch.float32)
+                for w_idx, word in enumerate(obs_words):
+                    w_hash = int(hashlib.md5(word.encode("utf-8")).hexdigest()[:8], 16)
+                    dim_idx = w_hash % self.hidden_dim
+                    weight = 1.0 / (1.0 + (w_idx % 32) * 0.05)
+                    obs_features[dim_idx] += weight
+                for el in elements:
+                    if el.center:
+                        cx_dim = int(el.center[0] * (self.hidden_dim - 1))
+                        cy_dim = int(el.center[1] * (self.hidden_dim - 1))
+                        obs_features[cx_dim] += 0.5
+                        obs_features[cy_dim] += 0.5
+                f_norm = obs_features.norm(p=2)
+                if f_norm > 1e-6:
+                    obs_features = obs_features / f_norm
 
                 # Target coordinates
                 raw_bbox = t_data["target_bbox"]
