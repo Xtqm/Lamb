@@ -557,7 +557,7 @@ class RealWebTrajectoryDataset(Dataset):
 
     def _get_cache_path(self) -> Path:
         os.makedirs(self.cache_dir, exist_ok=True)
-        return self.cache_dir / f"real_web_trajectories_{self.split}_{self.dataset_size}_seed{self.seed}.pt"
+        return self.cache_dir / f"real_web_trajectories_{self.split}_{self.dataset_size}_h{self.hidden_dim}_seed{self.seed}.pt"
 
     def _init_dataset(self, force_rebuild: bool = False):
         cache_path = self._get_cache_path()

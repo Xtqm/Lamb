@@ -295,7 +295,8 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
                     f"GradNorm: {grad_norm_val:5.2f} | "
                     f"LR: {cur_lr:.2e} | "
                     f"Tok/s: {tok_per_sec:6.0f} | "
-                    f"VRAM: {vram_gb:.2f}GB (Peak: {peak_vram_gb:.2f}GB)"
+                    f"VRAM: {vram_gb:.2f}GB (Peak: {peak_vram_gb:.2f}GB)",
+                    flush=True,
                 )
 
                 log_entry = {
@@ -324,7 +325,8 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
                     f"Validation Result: Loss: {val_metrics['val_loss']:.3f} | "
                     f"ActAcc: {val_metrics['val_acc_action_type']*100:.2f}% (Target: >70%) | "
                     f"CoordMAE: {val_metrics['val_coord_mae']:.4f} (Target: <0.05) | "
-                    f"JEPASim: {val_metrics['val_jepa_cos_sim']:.4f} (Target: >0.85)"
+                    f"JEPASim: {val_metrics['val_jepa_cos_sim']:.4f} (Target: >0.85)",
+                    flush=True,
                 )
                 if history:
                     history[-1]["val_metrics"] = val_metrics

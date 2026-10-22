@@ -405,14 +405,11 @@ class JEDM2Model(nn.Module):
         # JEPA World Model evaluation: connect directly to contextual backbone representations
         jepa_loss, jepa_metrics = None, None
         if self.jepa is not None and action_t is not None and obs_next is not None:
-            if obs_t is not None:
-                h_jepa_in = obs_t
+            # Derive contextual backbone representation directly from recurrent stack
+            if h_text.ndim == 3:
+                h_jepa_in = h_text.mean(dim=1)
             else:
-                # Derive contextual backbone representation directly from recurrent stack
-                if h_text.ndim == 3:
-                    h_jepa_in = h_text.mean(dim=1)
-                else:
-                    h_jepa_in = h_text
+                h_jepa_in = h_text
 
             vt_t = visual_tokens_t if visual_tokens_t is not None else visual_tokens
             vt_next = visual_tokens_next
