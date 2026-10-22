@@ -1,6 +1,6 @@
 # JED-M2 Large Action Model - Benchmark Evaluation Report
 
-**Generated:** 2026-10-21 22:03:31 UTC  
+**Generated:** 2026-10-22 00:33:46 UTC  
 **Benchmark Domain:** `mind2web_test`  
 **Evaluation Device:** `cuda`  
 
@@ -13,8 +13,9 @@ Evaluated on 20 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on
 
 | Checkpoint | Episodes | Task SR (%) | Step SR | Macro F1 | Micro F1 | Coord MAE | Coord Tol Acc (eps<=0.05) | Efficiency Ratio | Latency (ms/step) | Throughput (tok/s) | Peak VRAM (MB) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **checkpoint_step_300** | 20 | 0.00% | 0.5650 | 0.5363 | 0.5614 | 0.3015 | 0.0683 | 0.0000 | 647.46 ms | 88.0 | 135.3 MB |
-| **jed_m2_grpo_step_50** | 20 | 0.00% | 0.5817 | 0.5433 | 0.5789 | 0.3015 | 0.0683 | 0.0000 | 652.22 ms | 87.4 | 135.3 MB |
+| **checkpoint_step_300** | 20 | 0.00% | 0.5650 | 0.5363 | 0.5614 | 0.3015 | 0.0683 | 0.0000 | 760.75 ms | 74.7 | 135.3 MB |
+| **jed_m2_grpo_step_50** | 20 | 0.00% | 0.5717 | 0.5314 | 0.5702 | 0.3016 | 0.0767 | 0.0000 | 737.88 ms | 76.9 | 135.3 MB |
+| **jed_m2_grpo_step_200** | 20 | 0.00% | 0.5350 | 0.5169 | 0.5351 | 0.3015 | 0.0767 | 0.0000 | 762.06 ms | 74.6 | 135.3 MB |
 
 ---
 
@@ -23,7 +24,8 @@ Evaluated on 20 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on
 | Checkpoint | CLICK | TYPE | SCROLL | NAVIGATE | API_CALL | FINISH |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **checkpoint_step_300** | 0.571 | 0.667 | 0.632 | 1.000 | 0.000 | 0.348 |
-| **jed_m2_grpo_step_50** | 0.598 | 0.667 | 0.632 | 1.000 | 0.000 | 0.364 |
+| **jed_m2_grpo_step_50** | 0.598 | 0.667 | 0.600 | 0.960 | 0.000 | 0.364 |
+| **jed_m2_grpo_step_200** | 0.554 | 0.667 | 0.600 | 0.960 | 0.000 | 0.320 |
 
 ---
 
