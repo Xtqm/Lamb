@@ -42,6 +42,7 @@ from jed_m2.dataset import (
 )
 from jed_m2.environment import ScenarioDefinition, WebOSEnvironment, get_default_scenarios
 from jed_m2.model import JEDM2Model
+from jed_m2.real_dataset import RealWebTrajectoryDataset
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,8 +54,8 @@ def parse_args() -> argparse.Namespace:
         "--benchmark",
         type=str,
         default="simulated",
-        choices=["mind2web", "webarena", "simulated"],
-        help="Target benchmark suite to evaluate: mind2web, webarena, or simulated Web/OS sandbox.",
+        choices=["mind2web", "webarena", "simulated", "real_web"],
+        help="Target benchmark suite to evaluate: mind2web, webarena, simulated Web/OS sandbox, or real_web (offline HTML DOM traces).",
     )
     parser.add_argument(
         "--model_path",
@@ -252,6 +253,32 @@ def create_offline_dataset(
     return dataset
 
 
+def load_real_web_dataset(
+    split: str,
+    num_episodes: int,
+    seed: int,
+) -> List[Any]:
+    """
+    Loads deterministic real-world web interaction trajectory episodes from RealWebTrajectoryDataset.
+
+    Args:
+        split: 'val' or 'test'.
+        num_episodes: Number of trajectories.
+        seed: Random seed.
+
+    Returns:
+        List of RealWebTrajectorySample objects.
+    """
+    config = JEDM2Config()
+    dataset = RealWebTrajectoryDataset(
+        config=config,
+        split=split,
+        dataset_size=max(num_episodes, 500),
+        seed=seed,
+    )
+    return dataset.samples[:num_episodes]
+
+
 def run_benchmark_for_checkpoint(
     checkpoint_path: Optional[str],
     benchmark_name: str,
@@ -262,7 +289,7 @@ def run_benchmark_for_checkpoint(
     dtype_str: str,
     tolerance: float,
     seed: int,
-    offline_trajectories: Optional[List[TrajectorySample]] = None,
+    offline_trajectories: Optional[List[Any]] = None,
     model_size: str = "nano",
 ) -> BenchmarkSummary:
     """
@@ -270,7 +297,7 @@ def run_benchmark_for_checkpoint(
 
     Args:
         checkpoint_path: Path to checkpoint file or None.
-        benchmark_name: 'mind2web', 'webarena', or 'simulated'.
+        benchmark_name: 'mind2web', 'webarena', 'real_web', or 'simulated'.
         split: 'val' or 'test'.
         num_episodes: Total episodes.
         max_steps: Maximum turns per episode.
@@ -293,7 +320,24 @@ def run_benchmark_for_checkpoint(
     agent = JEDM2Agent(model=model, config=model.config, tokenizer=tokenizer, device=device, dtype=dtype)
     evaluator = TaskEvaluator(tolerance_radius=tolerance)
 
-    if benchmark_name in ("mind2web", "webarena"):
+    if benchmark_name == "real_web":
+        # Real-world HTML DOM trajectory replay
+        if offline_trajectories is None:
+            offline_trajectories = load_real_web_dataset(
+                split=split,
+                num_episodes=num_episodes,
+                seed=seed,
+            )
+
+        summary = evaluate_offline_dataset(
+            agent=agent,
+            trajectories=offline_trajectories,
+            evaluator=evaluator,
+            benchmark_name=f"real_web_{split}",
+            checkpoint_name=label,
+            max_episodes=num_episodes,
+        )
+    elif benchmark_name in ("mind2web", "webarena"):
         # Offline dataset replay
         if offline_trajectories is None:
             offline_trajectories = create_offline_dataset(
@@ -363,8 +407,16 @@ def main():
     print("=" * 80)
 
     # If offline dataset, pre-generate once so all checkpoints are tested on identical episodes
-    offline_trajectories: Optional[List[TrajectorySample]] = None
-    if args.benchmark in ("mind2web", "webarena"):
+    offline_trajectories: Optional[List[Any]] = None
+    if args.benchmark == "real_web":
+        print(f"Pre-loading {args.num_episodes} real-world web ({args.split}) trajectory episodes...")
+        offline_trajectories = load_real_web_dataset(
+            split=args.split,
+            num_episodes=args.num_episodes,
+            seed=args.seed,
+        )
+        print(f"Real web dataset ready: {len(offline_trajectories)} episodes.\n")
+    elif args.benchmark in ("mind2web", "webarena"):
         print(f"Pre-generating {args.num_episodes} {args.benchmark} ({args.split}) trajectory episodes...")
         offline_trajectories = create_offline_dataset(
             benchmark_name=args.benchmark,

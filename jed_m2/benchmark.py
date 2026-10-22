@@ -717,20 +717,21 @@ def evaluate_offline_dataset(
             agent_out: AgentStepOutput = agent.act(
                 obs_text=turn.obs_text,
                 obs_features=turn.obs_features,
-                screenshot=turn.screenshot,
+                screenshot=getattr(turn, "screenshot", None),
             )
 
             latency_ms = (time.perf_counter() - t_start) * 1000.0
             token_count = len(agent.tokenizer.encode(turn.obs_text)) + agent_out.num_thought_tokens + 4
 
             # Ground truth values
-            gt_action_id = int(turn.action_type.value)
+            gt_action_id = int(turn.action_type.value) if hasattr(turn.action_type, "value") else int(turn.action_type)
             gt_coords = turn.coordinates
 
             # Find matching UI element bbox if available
             target_bbox: Optional[Tuple[float, float, float, float]] = None
-            for el in turn.dom_elements:
-                if el.bbox is not None and len(el.bbox) == 4:
+            elements = getattr(turn, "dom_elements", None) or getattr(turn, "interactive_elements", [])
+            for el in elements:
+                if getattr(el, "bbox", None) is not None and len(el.bbox) == 4:
                     # If coordinate falls inside bbox, use as target
                     bx_min, by_min, bx_max, by_max = el.bbox
                     if bx_min <= gt_coords[0] <= bx_max and by_min <= gt_coords[1] <= by_max:

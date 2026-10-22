@@ -306,6 +306,11 @@ class RealWebInteractionTurn:
     argument: str  # String payload (typed text, target URL, scroll direction)
     target_element_id: Optional[int] = None
     reward: float = 0.0
+    screenshot: Optional[torch.Tensor] = None
+
+    @property
+    def dom_elements(self) -> List[InteractiveElement]:
+        return self.interactive_elements
 
 
 @dataclass
