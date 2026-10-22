@@ -72,15 +72,16 @@ def normalize_bbox(
     raw_bbox: Union[List[float], Tuple[float, float, float, float], str],
     viewport_w: float = 1280.0,
     viewport_h: float = 720.0,
+    is_xywh: bool = True,
 ) -> Tuple[float, float, float, float]:
     """
     Normalizes arbitrary bounding box representation to [x_min, y_min, x_max, y_max] in [0, 1]^2.
-    Handles pixel coordinates, string representations, and clamps to [0, 1].
+    Handles pixel coordinates, string representations, [x, y, w, h] (default for web/DOM), and clamps to [0, 1].
     """
     coords: List[float] = []
     if isinstance(raw_bbox, str):
-        # Extract floats from string e.g. "[100, 200, 300, 250]"
-        nums = re.findall(r"[-+]?\d*\.\d+|\d+", raw_bbox)
+        # Extract floats from string e.g. "110,607.390625,264,78" or "[100, 200, 300, 250]"
+        nums = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", raw_bbox)
         coords = [float(n) for n in nums[:4]]
     elif isinstance(raw_bbox, (list, tuple)):
         coords = [float(x) for x in raw_bbox[:4]]
@@ -89,17 +90,25 @@ def normalize_bbox(
         # Fallback default unit box
         return (0.0, 0.0, 0.1, 0.05)
 
-    x1, y1, x2, y2 = coords[0], coords[1], coords[2], coords[3]
+    c1, c2, c3, c4 = coords[0], coords[1], coords[2], coords[3]
 
     # Detect if coordinates are already normalized in [0, 1] or raw pixels
-    is_pixel = (x1 > 1.0 or y1 > 1.0 or x2 > 1.0 or y2 > 1.0)
+    is_pixel = (c1 > 1.0 or c2 > 1.0 or c3 > 1.0 or c4 > 1.0)
     w_scale = viewport_w if is_pixel else 1.0
     h_scale = viewport_h if is_pixel else 1.0
 
-    x_min = max(0.0, min(1.0, min(x1, x2) / w_scale))
-    y_min = max(0.0, min(1.0, min(y1, y2) / h_scale))
-    x_max = max(0.0, min(1.0, max(x1, x2) / w_scale))
-    y_max = max(0.0, min(1.0, max(y1, y2) / h_scale))
+    if is_xywh:
+        # c1=x (left), c2=y (top), c3=w (width), c4=h (height)
+        x_min = max(0.0, min(1.0, c1 / w_scale))
+        y_min = max(0.0, min(1.0, c2 / h_scale))
+        x_max = max(0.0, min(1.0, (c1 + max(0.0, c3)) / w_scale))
+        y_max = max(0.0, min(1.0, (c2 + max(0.0, c4)) / h_scale))
+    else:
+        # c1=x1, c2=y1, c3=x2, c4=y2
+        x_min = max(0.0, min(1.0, min(c1, c3) / w_scale))
+        y_min = max(0.0, min(1.0, min(c2, c4) / h_scale))
+        x_max = max(0.0, min(1.0, max(c1, c3) / w_scale))
+        y_max = max(0.0, min(1.0, max(c2, c4) / h_scale))
 
     # Ensure minimum non-zero bounding box dimension
     if x_max <= x_min:
@@ -590,7 +599,9 @@ class RealWebTrajectoryDataset(Dataset):
     def _get_cache_path(self) -> Path:
         os.makedirs(self.cache_dir, exist_ok=True)
         has_m2w = False
-        if self.raw_mind2web_dir:
+        if self.raw_mind2web_dir and self.raw_mind2web_dir.exists():
+            if list(self.raw_mind2web_dir.glob("*.json")):
+                has_m2w = True
             raw_split_dir = self.raw_mind2web_dir / self.split
             if raw_split_dir.exists() and list(raw_split_dir.glob("task_*.json")):
                 has_m2w = True
@@ -619,7 +630,19 @@ class RealWebTrajectoryDataset(Dataset):
 
     def _generate_split_samples(self) -> List[RealWebTrajectorySample]:
         """Generates stratified trajectory samples from real Mind2Web or offline templates."""
-        if self.raw_mind2web_dir:
+        if self.raw_mind2web_dir and self.raw_mind2web_dir.exists():
+            # 1. Check for genuine Mind2Web task chunk JSON files (e.g., train_0.json)
+            chunk_files = sorted(list(self.raw_mind2web_dir.glob("*.json")))
+            if chunk_files:
+                logger.info(
+                    "Ingesting genuine Mind2Web corpus from %s (%d chunk file(s))",
+                    self.raw_mind2web_dir, len(chunk_files)
+                )
+                samples = self._generate_from_mind2web_chunks(chunk_files)
+                if samples:
+                    return samples
+
+            # 2. Check for task_*.json files in split subdirectories
             raw_split_dir = self.raw_mind2web_dir / self.split
             if raw_split_dir.exists():
                 task_files = sorted(list(raw_split_dir.glob("task_*.json")))
@@ -632,6 +655,159 @@ class RealWebTrajectoryDataset(Dataset):
             self.raw_mind2web_dir, self.split
         )
         return self._generate_from_templates()
+
+    def _generate_from_mind2web_chunks(
+        self, chunk_files: List[Path]
+    ) -> List[RealWebTrajectorySample]:
+        """Loads and parses genuine Mind2Web chunk JSON arrays (e.g. train_0.json)."""
+        all_tasks: List[Dict[str, Any]] = []
+        for cf in chunk_files:
+            try:
+                with open(cf, "r", encoding="utf-8") as f:
+                    content = json.load(f)
+                    if isinstance(content, list):
+                        all_tasks.extend(content)
+                    elif isinstance(content, dict) and "actions" in content:
+                        all_tasks.append(content)
+            except Exception as e:
+                logger.warning("Failed to load chunk file %s: %s", cf, e)
+
+        if not all_tasks:
+            return []
+
+        # Deterministic partition: 85% train, 15% validation/test
+        split_idx = max(1, int(len(all_tasks) * 0.85))
+        if self.split == "train":
+            split_tasks = all_tasks[:split_idx]
+        else:
+            split_tasks = all_tasks[split_idx:]
+            if not split_tasks:
+                split_tasks = all_tasks
+
+        return self._parse_mind2web_task_list(split_tasks)
+
+    def _parse_mind2web_task_list(
+        self, tasks: List[Dict[str, Any]]
+    ) -> List[RealWebTrajectorySample]:
+        """Parses a list of genuine Mind2Web task dictionaries into RealWebTrajectorySample objects."""
+        samples: List[RealWebTrajectorySample] = []
+        num_tasks = len(tasks)
+
+        for i in range(self.dataset_size):
+            task_idx = (self.seed + i) % num_tasks
+            task_data = tasks[task_idx]
+
+            ann_id = task_data.get("annotation_id", f"task_{i:04d}")
+            sample_id = f"m2w_{self.split}_{i:05d}_{ann_id}"
+            domain = task_data.get("domain", task_data.get("website", "web"))
+            website = task_data.get("website", "web")
+            goal = task_data.get("confirmed_task", "Complete web interaction")
+            turns: List[RealWebInteractionTurn] = []
+
+            actions = task_data.get("actions", [])
+            for turn_idx, act_info in enumerate(actions):
+                # Retrieve HTML code from cleaned_html or raw_html
+                html_code = act_info.get("cleaned_html") or act_info.get("raw_html") or ""
+                if not html_code:
+                    html_code = "<html><body><button id='action-btn' bbox='[100,100,200,150]'>Action</button></body></html>"
+
+                elements, _ = FastDOMParser.parse_html(html_code, max_elements=64)
+                obs_dom_strs = [el.to_dom_string() for el in elements]
+                url_str = act_info.get("url", f"https://www.{website}.com")
+                obs_text = f"URL: {url_str} | DOM: " + " ".join(obs_dom_strs)
+
+                obs_features = self.compute_obs_features(obs_text, elements, self.hidden_dim)
+
+                # Target coordinates and bounding box from pos_candidates
+                raw_bbox = None
+                pos_cands = act_info.get("pos_candidates", [])
+                if pos_cands and isinstance(pos_cands, list):
+                    cand0 = pos_cands[0]
+                    attrs = cand0.get("attributes", {})
+                    if isinstance(attrs, str):
+                        try:
+                            attrs = json.loads(attrs)
+                        except Exception:
+                            attrs = {}
+                    if isinstance(attrs, dict):
+                        raw_bbox = attrs.get("bounding_box_rect")
+
+                if not raw_bbox:
+                    raw_bbox = act_info.get("target_bounding_box") or act_info.get("bbox")
+                if not raw_bbox and "target_element" in act_info:
+                    raw_bbox = act_info["target_element"].get("bbox")
+                if not raw_bbox:
+                    raw_bbox = (100.0, 100.0, 200.0, 50.0)
+
+                norm_box = normalize_bbox(raw_bbox)
+                cx = (norm_box[0] + norm_box[2]) / 2.0
+                cy = (norm_box[1] + norm_box[3]) / 2.0
+
+                # Action type mapping
+                op_dict = act_info.get("operation", {})
+                op_str = (
+                    op_dict.get("op") or op_dict.get("original_op") or "CLICK"
+                ).upper() if isinstance(op_dict, dict) else str(op_dict).upper()
+
+                if "CLICK" in op_str or "SELECT" in op_str or "HOVER" in op_str:
+                    action_type = ActionType.CLICK
+                elif "TYPE" in op_str or "ENTER" in op_str or "INPUT" in op_str:
+                    action_type = ActionType.TYPE
+                elif "SCROLL" in op_str:
+                    action_type = ActionType.SCROLL
+                elif "NAV" in op_str:
+                    action_type = ActionType.NAVIGATE
+                elif "FINISH" in op_str or "COMPLETE" in op_str:
+                    action_type = ActionType.FINISH
+                else:
+                    action_type = ActionType.CLICK
+
+                # Argument
+                arg_val = op_dict.get("value", "") if isinstance(op_dict, dict) else ""
+                argument = str(arg_val) if arg_val is not None else ""
+
+                # Target element matching
+                target_id = None
+                min_dist = float("inf")
+                for el in elements:
+                    x1, y1, x2, y2 = el.bbox
+                    if x1 <= cx <= x2 and y1 <= cy <= y2:
+                        target_id = el.element_id
+                        break
+                    el_cx, el_cy = el.center
+                    dist = (el_cx - cx) ** 2 + (el_cy - cy) ** 2
+                    if dist < min_dist:
+                        min_dist = dist
+                        target_id = el.element_id
+
+                thought = act_info.get("thought", f"Execute {action_type.name} at coordinates ({cx:.2f}, {cy:.2f})")
+
+                turn = RealWebInteractionTurn(
+                    turn_id=turn_idx,
+                    url=url_str,
+                    interactive_elements=elements,
+                    obs_text=obs_text,
+                    obs_features=obs_features,
+                    thought=thought,
+                    action_type=action_type,
+                    coordinates=(cx, cy),
+                    argument=argument,
+                    target_element_id=target_id,
+                    reward=1.0 if turn_idx == len(actions) - 1 else 0.0,
+                )
+                turns.append(turn)
+
+            sample = RealWebTrajectorySample(
+                sample_id=sample_id,
+                domain=domain,
+                goal=goal,
+                turns=turns,
+                split=self.split,
+                total_reward=1.0,
+            )
+            samples.append(sample)
+
+        return samples
 
     def _generate_from_mind2web(
         self, raw_split_dir: Path, task_files: List[Path]
