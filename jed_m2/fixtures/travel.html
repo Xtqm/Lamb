@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Postmill Flight & Hotel Booking</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 20px; width: 1280px; height: 800px; box-sizing: border-box; }
+    .search-bar { display: flex; gap: 10px; margin-top: 20px; }
+    input, button { padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }
+    button { background: #007bff; color: white; border: none; cursor: pointer; }
+    .results { margin-top: 25px; display: flex; flex-direction: column; gap: 15px; }
+    .hotel-card { border: 1px solid #ccc; padding: 15px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; }
+    #reservation-badge { display: none; padding: 15px; background: #e2f0d9; color: #385723; border: 1px solid #c5e0b4; border-radius: 4px; margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <h1>Postmill Travel Portal</h1>
+  <div class="search-bar">
+    <input id="destination-input" placeholder="Enter City (e.g. San Francisco)" />
+    <button id="search-hotels-btn">Search Hotels</button>
+  </div>
+  <div class="results">
+    <div class="hotel-card">
+      <div>
+        <h3>Grand Bayview Hotel SF</h3>
+        <p>$220/night | 4.8 Stars | Downtown San Francisco</p>
+      </div>
+      <button id="reserve-btn-1" onclick="document.getElementById('reservation-badge').style.display = 'block';">Reserve Room</button>
+    </div>
+  </div>
+  <div id="reservation-badge">Reservation Confirmed: Grand Bayview Hotel SF (Confirmation #SF-99120)</div>
+</body>
+</html>

@@ -28,6 +28,11 @@ from jed_m2.browser import (
     PlaywrightBrowserEnvironment,
     PlaywrightStepResult,
 )
+from jed_m2.playwright_env import (
+    PlaywrightWebEnvironment,
+    WebTaskOracle,
+    get_default_web_oracles,
+)
 from jed_m2.config import JEDM2Config, JEDM2MediumConfig
 from jed_m2.dataset import (
     AgentTrajectoryDataset,
@@ -80,6 +85,15 @@ from jed_m2.real_dataset import (
     RealWebTrajectoryDataset,
     RealWebTrajectorySample,
     normalize_bbox,
+)
+from jed_m2.real_preference_dataset import (
+    PreferenceTrajectory,
+    PreferenceTurn,
+    RealPreferenceCollator,
+    RealPreferencePair,
+    RealWebPreferenceDataset,
+    inject_action_primitive_substitution,
+    inject_spatial_coordinate_perturbation,
 )
 from jed_m2.rl import (
     DPOConfig,
@@ -182,6 +196,9 @@ __all__ = [
     "WebOSEnvironment",
     "PlaywrightBrowserEnvironment",
     "PlaywrightStepResult",
+    "PlaywrightWebEnvironment",
+    "WebTaskOracle",
+    "get_default_web_oracles",
     "EnvironmentState",
     "StepResult",
     "ScenarioDefinition",
@@ -212,4 +229,11 @@ __all__ = [
     "RealWebTrajectorySample",
     "RealWebTrajectoryDataset",
     "RealTrajectoryCollator",
+    "RealWebPreferenceDataset",
+    "RealPreferenceCollator",
+    "RealPreferencePair",
+    "PreferenceTrajectory",
+    "PreferenceTurn",
+    "inject_spatial_coordinate_perturbation",
+    "inject_action_primitive_substitution",
 ]

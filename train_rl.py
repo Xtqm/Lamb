@@ -20,6 +20,7 @@ from jed_m2.config import JEDM2Config, JEDM2MediumConfig
 from jed_m2.dataset import SimpleLAMTokenizer
 from jed_m2.environment import WebOSEnvironment, get_default_scenarios
 from jed_m2.model import JEDM2Model
+from jed_m2.real_preference_dataset import RealPreferenceCollator, RealWebPreferenceDataset
 from jed_m2.rl import DPOConfig, DPOTrainer, GRPOConfig, GRPOTrainer
 from jed_m2.rl_pipeline import RolloutTrajectory, TrajectoryRolloutSampler
 from jed_m2.scenario_generator import DynamicScenarioGenerator
@@ -204,8 +205,34 @@ def parse_args() -> argparse.Namespace:
 
     # DPO Hyperparameters
     parser.add_argument("--beta_dpo", type=float, default=0.1, help="Implicit reward scaling temperature beta for DPO")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="procedural",
+        choices=["procedural", "real_mind2web"],
+        help="Dataset source for offline DPO: 'procedural' (rollout pairing) or 'real_mind2web' (Mind2Web traces)",
+    )
+    parser.add_argument(
+        "--dataset_size",
+        type=int,
+        default=500,
+        help="Number of preference pairs to load when using real_mind2web",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=2,
+        help="Batch size of preference pairs per DPO iteration",
+    )
 
     # Environment & Tasks
+    parser.add_argument(
+        "--env_type",
+        type=str,
+        default="webos",
+        choices=["webos", "browser"],
+        help="Environment backend for GRPO rollouts: 'webos' (procedural state machine) or 'browser' (headless Playwright)",
+    )
     parser.add_argument(
         "--scenarios",
         type=str,
@@ -283,6 +310,7 @@ def main() -> None:
     else:
         print(f"DPO Beta              : {args.beta_dpo}")
     print(f"Target Scenarios      : {', '.join(scenarios)}")
+    print(f"Environment Backend   : {args.env_type.upper()}")
     print(f"Max Turns / Episode   : {args.max_turns}")
     print(f"Curriculum Mode       : {'ENABLED' if args.curriculum else 'DISABLED'}")
     if args.curriculum:
@@ -382,6 +410,17 @@ def main() -> None:
             optimizer=optimizer,
         )
 
+        browser_env = None
+        if args.env_type == "browser":
+            from jed_m2.playwright_env import PlaywrightWebEnvironment
+            print("[Init] Initializing PlaywrightWebEnvironment for real-web GRPO rollouts...")
+            browser_env = PlaywrightWebEnvironment(
+                config=model_config,
+                scenario_id=scenarios[0],
+                device=device,
+                dtype=dtype,
+            )
+
         header_suffix = " | Curriculum" if args.curriculum else ""
         print(f"[Header] Iteration | GRPO Loss | Mean Rew | Mean Adv | Mean KL | Clip Frac | Grad Norm | Tok/s | Peak VRAM{header_suffix}")
         print("-" * 115)
@@ -405,6 +444,8 @@ def main() -> None:
                 max_turns=cur_turns,
                 generator=scenario_gen,
                 seed=args.seed + iteration * 100 if scenario_gen is not None else None,
+                env_type=args.env_type,
+                browser_env=browser_env,
             )
 
             # Record outcomes for curriculum advancement (goal success or positive milestone)
@@ -480,6 +521,9 @@ def main() -> None:
                     ckpt_path,
                 )
 
+        if browser_env is not None:
+            browser_env.close()
+
     elif args.mode == "dpo":
         dpo_config = DPOConfig(beta=args.beta_dpo)
         trainer = DPOTrainer(
@@ -489,28 +533,53 @@ def main() -> None:
             optimizer=optimizer,
         )
 
+        pref_dataset = None
+        pref_collator = None
+        if args.dataset == "real_mind2web":
+            print(f"[Init] Loading RealWebPreferenceDataset (size={args.dataset_size}, seed={args.seed})...")
+            pref_dataset = RealWebPreferenceDataset(
+                config=model_config,
+                split="train",
+                dataset_size=args.dataset_size,
+                seed=args.seed,
+            )
+            pref_collator = RealPreferenceCollator(
+                config=model_config,
+                tokenizer=tokenizer,
+                device=device,
+            )
+            print(f"[Init] Successfully loaded {len(pref_dataset)} Mind2Web preference pairs.")
+
         print("[Header] Iteration | DPO Loss  | Margin  | Accuracy | Chosen Rew | Rej Rew  | Grad Norm | Tok/s | Peak VRAM")
         print("-" * 105)
 
         for iteration in range(1, args.iterations + 1):
             t_start = time.time()
-            scenario_id = scenarios[(iteration - 1) % len(scenarios)]
 
-            # Sample rollouts until winning/losing preference pair is formed
-            group = sampler.sample_group_rollouts(
-                scenario_id=scenario_id,
-                group_size=max(4, args.group_size),
-                temperature=max(args.temperature, 0.8),
-                max_turns=args.max_turns,
-            )
-            pairs = sampler.create_preference_pairs(group)
+            if args.dataset == "real_mind2web" and pref_dataset is not None and pref_collator is not None:
+                # Sample batch of offline Mind2Web preference pairs
+                batch_pairs = [
+                    pref_dataset[((iteration - 1) * args.batch_size + b) % len(pref_dataset)]
+                    for b in range(args.batch_size)
+                ]
+                pref_batch = pref_collator(batch_pairs)
+            else:
+                scenario_id = scenarios[(iteration - 1) % len(scenarios)]
+                # Sample rollouts until winning/losing preference pair is formed
+                group = sampler.sample_group_rollouts(
+                    scenario_id=scenario_id,
+                    group_size=max(4, args.group_size),
+                    temperature=max(args.temperature, 0.8),
+                    max_turns=args.max_turns,
+                )
+                pairs = sampler.create_preference_pairs(group)
 
-            if not pairs:
-                # If no natural difference, fallback to highest vs lowest reward
-                sorted_g = sorted(group, key=lambda t: t.cumulative_reward, reverse=True)
-                pairs = [(sorted_g[0], sorted_g[-1])]
+                if not pairs:
+                    # If no natural difference, fallback to highest vs lowest reward
+                    sorted_g = sorted(group, key=lambda t: t.cumulative_reward, reverse=True)
+                    pairs = [(sorted_g[0], sorted_g[-1])]
 
-            pref_batch = sampler.collate_preference_pairs(pairs)
+                pref_batch = sampler.collate_preference_pairs(pairs)
 
             model.train()
             optimizer.zero_grad()

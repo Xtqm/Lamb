@@ -449,10 +449,13 @@ class TrajectoryRolloutSampler:
         max_turns: int = 8,
         generator: Optional[Any] = None,
         seed: Optional[int] = None,
+        env_type: str = "webos",
+        browser_env: Optional[Any] = None,
     ) -> List[RolloutTrajectory]:
         """
         Samples a group of G rollout trajectories for a single scenario goal for GRPO.
-        Supports both built-in benchmark scenarios and procedural environment synthesis.
+        Supports built-in benchmark scenarios, procedural environment synthesis, and
+        headless Playwright browser sandboxes.
 
         Args:
             scenario_id: Identifier of benchmark or procedural domain.
@@ -461,11 +464,38 @@ class TrajectoryRolloutSampler:
             max_turns: Maximum allowed turns per episode.
             generator: Optional DynamicScenarioGenerator instance.
             seed: Optional integer seed for procedural generation.
+            env_type: Environment backend: 'webos' (procedural mock) or 'browser' (Playwright).
+            browser_env: Optional reusable PlaywrightWebEnvironment instance.
 
         Returns:
             List of G RolloutTrajectory instances.
         """
         group: List[RolloutTrajectory] = []
+
+        if env_type == "browser":
+            from jed_m2.playwright_env import PlaywrightWebEnvironment
+            owns_browser = False
+            if browser_env is not None:
+                active_env = browser_env
+            else:
+                active_env = PlaywrightWebEnvironment(
+                    config=self.config,
+                    scenario_id=scenario_id,
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+                owns_browser = True
+
+            try:
+                for _ in range(group_size):
+                    traj = self.sample_trajectory(active_env, temperature=temperature, max_turns=max_turns)
+                    group.append(traj)
+            finally:
+                if owns_browser:
+                    active_env.close()
+
+            return group
+
         for _ in range(group_size):
             if generator is not None:
                 env = generator.generate(domain=scenario_id, seed=seed)

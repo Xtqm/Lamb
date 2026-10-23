@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Corporate Admin Portal</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 20px; width: 1280px; height: 800px; box-sizing: border-box; }
+    form { max-width: 500px; display: flex; flex-direction: column; gap: 12px; margin-top: 20px; }
+    input, select, button { padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }
+    button { background: #28a745; color: white; border: none; cursor: pointer; }
+    #confirm-banner { display: none; margin-top: 20px; padding: 15px; background: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>User Registration & Access Request</h1>
+  <form id="access-form" onsubmit="event.preventDefault(); document.getElementById('confirm-banner').style.display = 'block';">
+    <label for="user-name">Full Name</label>
+    <input id="user-name" placeholder="Enter full name" />
+    <label for="user-email">Email Address</label>
+    <input id="user-email" type="email" placeholder="name@company.internal" />
+    <label for="dept-select">Department</label>
+    <select id="dept-select">
+      <option value="engineering">Engineering</option>
+      <option value="operations">Operations</option>
+      <option value="security">Security</option>
+    </select>
+    <button id="submit-btn" type="submit">Submit Request</button>
+  </form>
+  <div id="confirm-banner">Access request submitted successfully! Reference #REQ-8821</div>
+</body>
+</html>

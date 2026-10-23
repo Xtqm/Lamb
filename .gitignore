@@ -28,6 +28,7 @@ wheels/
 *.safetensors
 *.onnx
 checkpoints/
+checkpoints_rl/
 runs/
 wandb/
 logs/

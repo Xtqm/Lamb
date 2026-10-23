@@ -1,19 +1,23 @@
 # JED-M2 Large Action Model - Benchmark Evaluation Report
 
-**Generated:** 2026-10-22 16:06:34 UTC  
-**Benchmark Domain:** `mind2web_test`  
+**Generated:** 2026-10-23 13:01:15 UTC  
+**Benchmark Domain:** `real_web_val`  
 **Evaluation Device:** `cuda`  
 
 ---
 
 ### Context & Notes
-Evaluated on 2 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on device=cuda.
+Evaluated on 15 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on device=cuda.
 
 ## 1. Comparative Performance Summary
 
 | Checkpoint | Episodes | Task SR (%) | Step SR | Macro F1 | Micro F1 | Coord MAE | Coord Tol Acc (eps<=0.05) | Efficiency Ratio | Latency (ms/step) | Throughput (tok/s) | Peak VRAM (MB) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **jed_m2_sft_base** | 2 | 0.00% | 0.0000 | 0.5000 | 0.0000 | 0.1946 | 0.0000 | 0.0000 | 373.71 ms | 51.8 | 134.8 MB |
+| **jed_m2_medium_step_1500** | 15 | 0.00% | 0.8303 | 0.8192 | 0.8440 | 0.4382 | 0.0111 | 0.0000 | 9695.06 ms | 38.5 | 600.7 MB |
+| **jed_m2_medium_step_3500** | 15 | 0.00% | 0.8103 | 0.8331 | 0.8257 | 0.3210 | 0.1192 | 0.0000 | 9664.19 ms | 38.3 | 600.5 MB |
+| **jed_m2_nano_step_500** | 15 | 0.00% | 0.5403 | 0.6214 | 0.5413 | 0.3946 | 0.0074 | 0.0000 | 3907.23 ms | 95.2 | 145.4 MB |
+| **jed_m2_nano_step_2000** | 15 | 0.00% | 0.8103 | 0.8331 | 0.8257 | 0.3604 | 0.1343 | 0.0000 | 3920.04 ms | 94.4 | 145.4 MB |
+| **jed_m2_nano_step_3000** | 15 | 0.00% | 0.8103 | 0.8331 | 0.8257 | 0.3618 | 0.1033 | 0.0000 | 4436.07 ms | 83.3 | 145.4 MB |
 
 ---
 
@@ -21,7 +25,11 @@ Evaluated on 2 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on 
 
 | Checkpoint | CLICK | TYPE | SCROLL | NAVIGATE | API_CALL | FINISH |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **jed_m2_sft_base** | 0.000 | 0.000 | 1.000 | 1.000 | 1.000 | 0.000 |
+| **jed_m2_medium_step_1500** | 0.915 | 0.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| **jed_m2_medium_step_3500** | 0.904 | 0.095 | 1.000 | 1.000 | 1.000 | 1.000 |
+| **jed_m2_nano_step_500** | 0.728 | 0.000 | 1.000 | 1.000 | 1.000 | 0.000 |
+| **jed_m2_nano_step_2000** | 0.904 | 0.095 | 1.000 | 1.000 | 1.000 | 1.000 |
+| **jed_m2_nano_step_3000** | 0.904 | 0.095 | 1.000 | 1.000 | 1.000 | 1.000 |
 
 ---
 
