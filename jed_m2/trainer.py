@@ -61,6 +61,32 @@ class JEDM2TrainerConfig:
         return self.micro_batch_size * self.grad_accum_steps
 
 
+def probe_training_device() -> Tuple[torch.device, torch.dtype, bool, str]:
+    """
+    Detects hardware capabilities, probes CUDA execution, and checks bfloat16 support.
+    Resets peak memory statistics if running on CUDA.
+
+    Returns:
+        Tuple of (device, dtype, is_cuda, gpu_name).
+    """
+    if torch.cuda.is_available():
+        try:
+            probe_a = torch.ones((2, 2), device="cuda", dtype=torch.bfloat16)
+            probe_b = probe_a @ probe_a
+            del probe_a, probe_b
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+
+            device = torch.device("cuda")
+            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            gpu_name = torch.cuda.get_device_name(0)
+            return device, dtype, True, gpu_name
+        except Exception:
+            pass
+
+    return torch.device("cpu"), torch.float32, False, "CPU"
+
+
 def build_optimizer(
     model: nn.Module,
     config: JEDM2TrainerConfig,
@@ -438,7 +464,7 @@ class JEDM2Trainer:
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        self.global_step = checkpoint.get("global_step", 0)
+        self.global_step = checkpoint.get("global_step", checkpoint.get("step", 0))
         self.accum_step = checkpoint.get("accum_step", 0)
         self.epoch = checkpoint.get("epoch", 0)
         self.latest_loss = checkpoint.get("latest_loss", 0.0)

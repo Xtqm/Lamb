@@ -99,8 +99,10 @@ from jed_m2.real_preference_dataset import (
     inject_spatial_coordinate_perturbation,
 )
 from jed_m2.rl import (
+    CurriculumScheduler,
     DPOConfig,
     DPOTrainer,
+    ExplorationScheduler,
     GRPOConfig,
     GRPOTrainer,
     calculate_dpo_loss,
@@ -130,6 +132,7 @@ from jed_m2.trainer import (
     JEDM2TrainerConfig,
     build_cosine_scheduler,
     build_optimizer,
+    probe_training_device,
 )
 from jed_m2.vision import (
     VisionPatchEncoder,
@@ -185,10 +188,13 @@ __all__ = [
     "JEDM2Trainer",
     "build_optimizer",
     "build_cosine_scheduler",
+    "probe_training_device",
     "DPOConfig",
     "GRPOConfig",
     "DPOTrainer",
     "GRPOTrainer",
+    "CurriculumScheduler",
+    "ExplorationScheduler",
     "calculate_dpo_loss",
     "calculate_grpo_loss",
     "compute_token_log_probs",

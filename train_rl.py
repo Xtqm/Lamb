@@ -21,106 +21,17 @@ from jed_m2.dataset import SimpleLAMTokenizer
 from jed_m2.environment import WebOSEnvironment, get_default_scenarios
 from jed_m2.model import JEDM2Model
 from jed_m2.real_preference_dataset import RealPreferenceCollator, RealWebPreferenceDataset
-from jed_m2.rl import DPOConfig, DPOTrainer, GRPOConfig, GRPOTrainer
+from jed_m2.rl import (
+    CurriculumScheduler,
+    DPOConfig,
+    DPOTrainer,
+    ExplorationScheduler,
+    GRPOConfig,
+    GRPOTrainer,
+)
 from jed_m2.rl_pipeline import RolloutTrajectory, TrajectoryRolloutSampler
 from jed_m2.scenario_generator import DynamicScenarioGenerator
-from jed_m2.trainer import JEDM2TrainerConfig, build_optimizer
-
-
-class CurriculumScheduler:
-    """
-    Curriculum Learning Scheduler for Multi-Turn Agent Workflows:
-    - Level 1: 1-step atomic actions (click, type, scroll, navigate), max_turns=1
-    - Level 2: 2-3 step compound workflows (search -> select -> add to cart), max_turns=3
-    - Level 3: 5-8 step long-horizon workflows (full checkout, multi-step form wizard, cloud admin), max_turns=8
-
-    Tracks moving success rate over a rolling window.
-    Advances to next level when moving success rate >= success_threshold (default 0.80).
-    """
-
-    LEVEL_CONFIGS = {
-        1: {"name": "Level 1: Focused (4 Turns)", "max_turns": 4, "complexity": 1},
-        2: {"name": "Level 2: Compound (6 Turns)", "max_turns": 6, "complexity": 2},
-        3: {"name": "Level 3: Long-Horizon (8 Turns)", "max_turns": 8, "complexity": 3},
-    }
-
-    def __init__(
-        self,
-        initial_level: int = 1,
-        success_threshold: float = 0.80,
-        window_size: int = 10,
-        min_episodes_per_level: int = 8,
-    ):
-        self.current_level = initial_level
-        self.success_threshold = success_threshold
-        self.window_size = window_size
-        self.min_episodes_per_level = min_episodes_per_level
-        self.history: List[float] = []
-        self.episodes_in_current_level = 0
-
-    @property
-    def max_turns(self) -> int:
-        return self.LEVEL_CONFIGS.get(self.current_level, {}).get("max_turns", 8)
-
-    @property
-    def level_name(self) -> str:
-        return self.LEVEL_CONFIGS.get(self.current_level, {}).get("name", f"Level {self.current_level}")
-
-    @property
-    def moving_success_rate(self) -> float:
-        if not self.history:
-            return 0.0
-        return sum(self.history) / len(self.history)
-
-    def record_outcomes(self, successes: List[bool]) -> bool:
-        """
-        Records episode success outcomes and checks for tier promotion.
-        Returns True if curriculum advanced to a higher level.
-        """
-        for s in successes:
-            self.history.append(1.0 if s else 0.0)
-            if len(self.history) > self.window_size:
-                self.history.pop(0)
-            self.episodes_in_current_level += 1
-
-        if (
-            self.current_level < 3
-            and self.episodes_in_current_level >= self.min_episodes_per_level
-            and self.moving_success_rate >= self.success_threshold
-        ):
-            self.current_level += 1
-            self.episodes_in_current_level = 0
-            self.history.clear()
-            return True
-        return False
-
-
-class ExplorationScheduler:
-    """
-    Manages temperature annealing and adaptive entropy bonus scheduling to prevent policy entropy collapse.
-    """
-
-    def __init__(
-        self,
-        initial_temp: float = 0.7,
-        min_temp: float = 0.2,
-        temp_decay: float = 0.99,
-        initial_entropy_coeff: float = 0.01,
-        min_entropy_coeff: float = 0.001,
-        entropy_decay: float = 0.99,
-    ):
-        self.temperature = initial_temp
-        self.min_temp = min_temp
-        self.temp_decay = temp_decay
-        self.entropy_coeff = initial_entropy_coeff
-        self.min_entropy_coeff = min_entropy_coeff
-        self.entropy_decay = entropy_decay
-
-    def step(self) -> Tuple[float, float]:
-        """Steps temperature and entropy coefficient decay."""
-        self.temperature = max(self.min_temp, self.temperature * self.temp_decay)
-        self.entropy_coeff = max(self.min_entropy_coeff, self.entropy_coeff * self.entropy_decay)
-        return self.temperature, self.entropy_coeff
+from jed_m2.trainer import JEDM2TrainerConfig, build_optimizer, probe_training_device
 
 
 def parse_args() -> argparse.Namespace:

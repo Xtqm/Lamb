@@ -11,7 +11,6 @@ import argparse
 from dataclasses import asdict
 from datetime import datetime
 import json
-import math
 import os
 import sys
 import time
@@ -21,10 +20,14 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from jed_m2.config import JEDM2Config, JEDM2MediumConfig
-from jed_m2.losses import JEDM2CompositeLoss, JEDM2LossConfig
-from jed_m2.model import JEDM2Model, JEDM2Output, create_jed_m2_medium, create_jed_m2_nano
+from jed_m2.losses import JEDM2LossConfig
+from jed_m2.model import JEDM2Model, create_jed_m2_medium, create_jed_m2_nano
 from jed_m2.real_dataset import RealTrajectoryCollator, RealWebTrajectoryDataset
-from jed_m2.trainer import JEDM2TrainerConfig, build_cosine_scheduler, build_optimizer
+from jed_m2.trainer import (
+    JEDM2Trainer,
+    JEDM2TrainerConfig,
+    probe_training_device,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,20 +76,46 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+@torch.no_grad()
+def evaluate_validation(
+    trainer: JEDM2Trainer,
+    val_loader: DataLoader,
+    max_steps: int = 20,
+) -> Dict[str, float]:
+    """Evaluates validation loss and convergence metrics across held-out real web trajectories."""
+    trainer.model.eval()
+    total_val_loss = 0.0
+    accumulated_metrics: Dict[str, float] = {}
+    steps = 0
+
+    val_iter = iter(val_loader)
+    for _ in range(max_steps):
+        try:
+            batch = next(val_iter)
+        except StopIteration:
+            break
+
+        batch = batch.to(device=trainer.device, dtype=trainer.dtype)
+        step_loss, step_metrics = trainer.evaluation_step(batch)
+
+        total_val_loss += step_loss
+        for k, v in step_metrics.items():
+            accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + float(v)
+        steps += 1
+
+    steps = max(1, steps)
+    results = {f"val_{k}": v / steps for k, v in accumulated_metrics.items()}
+    results["val_loss"] = total_val_loss / steps
+    trainer.model.train()
+    return results
+
+
 def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
     if args is None:
         args = parse_args()
 
     # Hardware & Precision Setup
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        gpu_name = torch.cuda.get_device_name(0)
-        torch.cuda.reset_peak_memory_stats()
-        dtype = torch.bfloat16
-    else:
-        device = torch.device("cpu")
-        gpu_name = "CPU"
-        dtype = torch.float32
+    device, dtype, is_cuda, gpu_name = probe_training_device()
 
     # Model Configuration
     if args.model_size == "medium":
@@ -124,14 +153,9 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
     else:
         model = create_jed_m2_nano(config)
 
-    if not args.no_checkpointing:
-        model.gradient_checkpointing_enable()
-
-    model = model.to(device=device, dtype=dtype)
-
     param_counts = model.count_parameters()
-    total_m = param_counts['total_params'] / 1e6
-    active_m = param_counts['active_params'] / 1e6
+    total_m = param_counts["total_params"] / 1e6
+    active_m = param_counts["active_params"] / 1e6
     print(f"Total Parameters      : {total_m:.2f}M")
     print(f"Active Parameters     : {active_m:.2f}M per token")
 
@@ -173,7 +197,7 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
         drop_last=True,
     )
 
-    # Optimizer & Scheduler
+    # Configure Trainer
     trainer_cfg = JEDM2TrainerConfig(
         lr=peak_lr,
         min_lr=args.min_lr,
@@ -183,181 +207,156 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
         micro_batch_size=args.micro_batch_size,
         grad_accum_steps=grad_accum_steps,
         grad_clip_norm=args.grad_clip,
+        gradient_checkpointing=not args.no_checkpointing,
+        checkpoint_dir=args.checkpoint_dir,
+        save_interval=args.save_interval,
+        log_interval=args.log_interval,
+        seed=args.seed,
     )
-    optimizer, opt_type = build_optimizer(model, trainer_cfg, device)
-    scheduler = build_cosine_scheduler(optimizer, trainer_cfg)
-    print(f"Optimizer Configured  : {opt_type}")
 
-    # Loss Function
-    loss_fn = JEDM2CompositeLoss(config, loss_config=JEDM2LossConfig())
+    trainer = JEDM2Trainer(
+        model=model,
+        config=trainer_cfg,
+        loss_config=JEDM2LossConfig(),
+        device=device,
+    )
+    print(f"Optimizer Configured  : {trainer.opt_type}")
 
     # Checkpoint Directory
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     # Resume if requested
-    start_step = 0
     if args.resume and os.path.exists(args.resume):
         print(f"Resuming checkpoint from: {args.resume}")
-        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        if "scheduler_state_dict" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        start_step = ckpt.get("step", 0)
-        print(f"Resumed at step {start_step}")
+        trainer.load_checkpoint(args.resume)
+        print(f"Resumed at step {trainer.global_step}")
 
     # Training State Tracking
-    global_step = start_step
-    accum_count = 0
     running_loss = 0.0
     running_metrics: Dict[str, float] = {}
     history: List[Dict[str, Any]] = []
 
     train_iter = iter(train_loader)
     total_tokens_processed = 0
-    start_time = time.time()
     last_log_time = time.time()
     last_log_tokens = 0
+    last_eval_step = -1
+    last_save_step = -1
 
     print("\nStarting Pretraining Loop...")
-    model.train()
-    optimizer.zero_grad(set_to_none=True)
-
-    while global_step < args.max_steps:
+    while trainer.global_step < args.max_steps:
         try:
             batch = next(train_iter)
         except StopIteration:
             train_iter = iter(train_loader)
             batch = next(train_iter)
 
-        batch = batch.to(device=device, dtype=dtype)
+        batch = batch.to(device=trainer.device, dtype=trainer.dtype)
         batch_tokens = batch.input_ids.numel()
         total_tokens_processed += batch_tokens
 
-        # Forward pass with mixed precision
-        with torch.autocast(
-            device_type=device.type,
-            dtype=dtype,
-            enabled=(device.type == "cuda"),
-        ):
-            output: JEDM2Output = model(
-                input_ids=batch.input_ids,
-                attention_mask=batch.attention_mask,
-                obs_t=batch.jepa_obs_t,
-                action_t=batch.jepa_action_t,
-                obs_next=batch.jepa_obs_next,
-            )
-            loss, metrics = loss_fn(output, batch)
-
-        scaled_loss = loss / grad_accum_steps
-        scaled_loss.backward()
-
-        accum_count += 1
-        loss_val = loss.item()
+        # Step optimization through JEDM2Trainer
+        loss_val, step_metrics = trainer.training_step(batch)
         running_loss += loss_val
-        for k, v in metrics.items():
-            running_metrics[k] = running_metrics.get(k, 0.0) + v
+        for k, v in step_metrics.items():
+            running_metrics[k] = running_metrics.get(k, 0.0) + float(v)
 
-        # Gradient accumulation step
-        if accum_count % grad_accum_steps == 0:
-            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            grad_norm_val = float(grad_norm.item() if hasattr(grad_norm, "item") else grad_norm)
+        # Telemetry Logging when an accumulation boundary aligns with log_interval
+        if trainer.accum_step % (args.log_interval * grad_accum_steps) == 0 or trainer.global_step == 1:
+            cur_time = time.time()
+            elapsed = cur_time - last_log_time
+            tok_delta = total_tokens_processed - last_log_tokens
+            tok_per_sec = tok_delta / max(elapsed, 1e-4)
 
-            optimizer.step()
-            scheduler.step()
+            steps_counted = max(1, args.log_interval)
+            avg_loss = running_loss / steps_counted
+            avg_metrics = {k: v / steps_counted for k, v in running_metrics.items()}
+            cur_lr = trainer.get_current_lr()
+            grad_norm_val = step_metrics.get("grad_norm", 0.0)
 
-            # Apply Polyak momentum update to JEPA target encoder (EMA rule)
-            if hasattr(model, "jepa") and model.jepa is not None:
-                model.jepa.update_target_network()
+            vram_gb = 0.0
+            peak_vram_gb = 0.0
+            if torch.cuda.is_available():
+                vram_gb = torch.cuda.memory_allocated() / (1024**3)
+                peak_vram_gb = torch.cuda.max_memory_allocated() / (1024**3)
 
-            optimizer.zero_grad(set_to_none=True)
-            global_step += 1
+            print(
+                f"Step {trainer.global_step:5d}/{args.max_steps:5d} | "
+                f"Loss: {avg_loss:6.3f} | "
+                f"Reason: {avg_metrics.get('loss_reason', 0.0):5.2f} | "
+                f"ActAcc: {avg_metrics.get('acc_action_type', 0.0)*100:4.1f}% | "
+                f"CoordMAE: {avg_metrics.get('coord_mae', 0.0):.4f} | "
+                f"JEPASim: {avg_metrics.get('jepa_cos_sim', 0.0):.3f} | "
+                f"GradNorm: {grad_norm_val:5.2f} | "
+                f"LR: {cur_lr:.2e} | "
+                f"Tok/s: {tok_per_sec:6.0f} | "
+                f"VRAM: {vram_gb:.2f}GB (Peak: {peak_vram_gb:.2f}GB)",
+                flush=True,
+            )
 
-            # Telemetry Logging
-            if global_step % args.log_interval == 0 or global_step == 1:
-                cur_time = time.time()
-                elapsed = cur_time - last_log_time
-                tok_delta = total_tokens_processed - last_log_tokens
-                tok_per_sec = tok_delta / max(elapsed, 1e-4)
+            log_entry = {
+                "step": trainer.global_step,
+                "loss": avg_loss,
+                "metrics": avg_metrics,
+                "grad_norm": grad_norm_val,
+                "lr": cur_lr,
+                "throughput_tok_per_sec": tok_per_sec,
+                "vram_gb": vram_gb,
+                "peak_vram_gb": peak_vram_gb,
+                "timestamp": datetime.now().isoformat(),
+            }
+            history.append(log_entry)
 
-                avg_loss = running_loss / args.log_interval
-                avg_metrics = {k: v / args.log_interval for k, v in running_metrics.items()}
-                cur_lr = scheduler.get_last_lr()[0]
+            running_loss = 0.0
+            running_metrics.clear()
+            last_log_time = cur_time
+            last_log_tokens = total_tokens_processed
 
-                vram_gb = 0.0
-                peak_vram_gb = 0.0
-                if torch.cuda.is_available():
-                    vram_gb = torch.cuda.memory_allocated() / (1024**3)
-                    peak_vram_gb = torch.cuda.max_memory_allocated() / (1024**3)
+        # Periodic Validation Pass
+        if (
+            args.eval_interval > 0
+            and trainer.global_step > 0
+            and trainer.accum_step % grad_accum_steps == 0
+            and trainer.global_step % args.eval_interval == 0
+            and trainer.global_step != last_eval_step
+        ):
+            last_eval_step = trainer.global_step
+            print(f"\n--- Running Validation Pass at Step {trainer.global_step} ({args.eval_steps} micro-batches) ---")
+            val_metrics = evaluate_validation(trainer, val_loader, args.eval_steps)
+            print(
+                f"Validation Result: Loss: {val_metrics['val_loss']:.3f} | "
+                f"ActAcc: {val_metrics['val_acc_action_type']*100:.2f}% (Target: >70%) | "
+                f"CoordMAE: {val_metrics['val_coord_mae']:.4f} (Target: <0.05) | "
+                f"JEPASim: {val_metrics['val_jepa_cos_sim']:.4f} (Target: >0.85)",
+                flush=True,
+            )
+            if history:
+                history[-1]["val_metrics"] = val_metrics
 
-                print(
-                    f"Step {global_step:5d}/{args.max_steps:5d} | "
-                    f"Loss: {avg_loss:6.3f} | "
-                    f"Reason: {avg_metrics.get('loss_reason', 0.0):5.2f} | "
-                    f"ActAcc: {avg_metrics.get('acc_action_type', 0.0)*100:4.1f}% | "
-                    f"CoordMAE: {avg_metrics.get('coord_mae', 0.0):.4f} | "
-                    f"JEPASim: {avg_metrics.get('jepa_cos_sim', 0.0):.3f} | "
-                    f"GradNorm: {grad_norm_val:5.2f} | "
-                    f"LR: {cur_lr:.2e} | "
-                    f"Tok/s: {tok_per_sec:6.0f} | "
-                    f"VRAM: {vram_gb:.2f}GB (Peak: {peak_vram_gb:.2f}GB)",
-                    flush=True,
-                )
-
-                log_entry = {
-                    "step": global_step,
-                    "loss": avg_loss,
-                    "metrics": avg_metrics,
-                    "grad_norm": grad_norm_val,
-                    "lr": cur_lr,
-                    "throughput_tok_per_sec": tok_per_sec,
-                    "vram_gb": vram_gb,
-                    "peak_vram_gb": peak_vram_gb,
-                    "timestamp": datetime.now().isoformat(),
-                }
-                history.append(log_entry)
-
-                running_loss = 0.0
-                running_metrics.clear()
-                last_log_time = cur_time
-                last_log_tokens = total_tokens_processed
-
-            # Periodic Validation Evaluation Pass
-            if args.eval_interval > 0 and global_step % args.eval_interval == 0:
-                print(f"\n--- Running Validation Pass at Step {global_step} ({args.eval_steps} micro-batches) ---")
-                val_metrics = evaluate_validation(model, val_loader, loss_fn, device, dtype, args.eval_steps)
-                print(
-                    f"Validation Result: Loss: {val_metrics['val_loss']:.3f} | "
-                    f"ActAcc: {val_metrics['val_acc_action_type']*100:.2f}% (Target: >70%) | "
-                    f"CoordMAE: {val_metrics['val_coord_mae']:.4f} (Target: <0.05) | "
-                    f"JEPASim: {val_metrics['val_jepa_cos_sim']:.4f} (Target: >0.85)",
-                    flush=True,
-                )
-                if history:
-                    history[-1]["val_metrics"] = val_metrics
-                model.train()
-
-            # Periodic Checkpoint Persistence
-            if global_step % args.save_interval == 0:
-                ckpt_path = os.path.join(args.checkpoint_dir, f"jed_m2_{args.model_size}_step_{global_step}.pt")
-                torch.save(
-                    {
-                        "step": global_step,
-                        "model_size": args.model_size,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "scheduler_state_dict": scheduler.state_dict(),
-                        "config": asdict(config),
-                    },
-                    ckpt_path,
-                )
-                print(f"Checkpoint saved to: {ckpt_path}\n")
+        # Periodic Checkpoint Persistence
+        if (
+            trainer.global_step > 0
+            and trainer.accum_step % grad_accum_steps == 0
+            and trainer.global_step % args.save_interval == 0
+            and trainer.global_step != last_save_step
+        ):
+            last_save_step = trainer.global_step
+            ckpt_path = os.path.join(args.checkpoint_dir, f"jed_m2_{args.model_size}_step_{trainer.global_step}.pt")
+            saved_path = trainer.save_checkpoint(
+                ckpt_path,
+                additional_info={
+                    "step": trainer.global_step,
+                    "model_size": args.model_size,
+                    "config": asdict(config),
+                },
+            )
+            print(f"Checkpoint saved to: {saved_path}\n")
 
     # Final Evaluation & Convergence Check
     print("\n" + "=" * 80)
     print("Pretraining Complete. Running Final Convergence Evaluation...")
     print("=" * 80)
-    final_val_metrics = evaluate_validation(model, val_loader, loss_fn, device, dtype, args.eval_steps * 2)
+    final_val_metrics = evaluate_validation(trainer, val_loader, args.eval_steps * 2)
 
     act_acc = final_val_metrics["val_acc_action_type"]
     coord_mae = final_val_metrics["val_coord_mae"]
@@ -370,15 +369,14 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
 
     # Save Final Production Checkpoint
     final_ckpt_path = os.path.join(args.checkpoint_dir, f"jed_m2_{args.model_size}_pretrain_final.pt")
-    torch.save(
-        {
-            "step": global_step,
+    trainer.save_checkpoint(
+        final_ckpt_path,
+        additional_info={
+            "step": trainer.global_step,
             "model_size": args.model_size,
-            "model_state_dict": model.state_dict(),
             "config": asdict(config),
             "final_metrics": final_val_metrics,
         },
-        final_ckpt_path,
     )
     print(f"Final model checkpoint saved to: {final_ckpt_path}")
 
@@ -398,59 +396,11 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
         print(f"Training telemetry history exported to: {args.export_history}")
 
     return {
-        "final_step": global_step,
+        "final_step": trainer.global_step,
         "final_val_metrics": final_val_metrics,
         "history": history,
         "final_checkpoint": final_ckpt_path,
     }
-
-
-@torch.no_grad()
-def evaluate_validation(
-    model: nn.Module,
-    val_loader: DataLoader,
-    loss_fn: JEDM2CompositeLoss,
-    device: torch.device,
-    dtype: torch.dtype,
-    max_steps: int = 20,
-) -> Dict[str, float]:
-    """Evaluates validation loss and convergence metrics across held-out real web trajectories."""
-    model.eval()
-    total_val_loss = 0.0
-    accumulated_metrics: Dict[str, float] = {}
-    steps = 0
-
-    val_iter = iter(val_loader)
-    for _ in range(max_steps):
-        try:
-            batch = next(val_iter)
-        except StopIteration:
-            break
-
-        batch = batch.to(device=device, dtype=dtype)
-        with torch.autocast(
-            device_type=device.type,
-            dtype=dtype,
-            enabled=(device.type == "cuda"),
-        ):
-            output: JEDM2Output = model(
-                input_ids=batch.input_ids,
-                attention_mask=batch.attention_mask,
-                obs_t=batch.jepa_obs_t,
-                action_t=batch.jepa_action_t,
-                obs_next=batch.jepa_obs_next,
-            )
-            loss, metrics = loss_fn(output, batch)
-
-        total_val_loss += loss.item()
-        for k, v in metrics.items():
-            accumulated_metrics[k] = accumulated_metrics.get(k, 0.0) + v
-        steps += 1
-
-    steps = max(1, steps)
-    results = {f"val_{k}": v / steps for k, v in accumulated_metrics.items()}
-    results["val_loss"] = total_val_loss / steps
-    return results
 
 
 if __name__ == "__main__":
