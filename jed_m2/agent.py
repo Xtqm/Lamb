@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from jed_m2.config import JEDM2Config
+from jed_m2.core.features import compute_obs_features
 from jed_m2.dataset import SimpleLAMTokenizer
 from jed_m2.environment import StepResult, WebOSEnvironment
 from jed_m2.heads import ActionOutput, ActionType
@@ -390,8 +391,7 @@ class JEDM2Agent:
                     feat = feat.unsqueeze(0)
                 z_t = self.model.jepa.encode(feat, visual_tokens=visual_tokens)
             else:
-                from jed_m2.real_dataset import RealWebTrajectoryDataset
-                feat = RealWebTrajectoryDataset.compute_obs_features(obs_text, [], self.config.hidden_dim).to(device=self.device, dtype=self.dtype).unsqueeze(0)
+                feat = compute_obs_features(obs_text, [], self.config.hidden_dim).to(device=self.device, dtype=self.dtype).unsqueeze(0)
                 z_t = self.model.jepa.encode(feat, visual_tokens=visual_tokens)
 
             # Prepare goal representation z_goal

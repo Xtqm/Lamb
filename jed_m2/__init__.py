@@ -33,6 +33,7 @@ from jed_m2.playwright_env import (
     WebTaskOracle,
     get_default_web_oracles,
 )
+from jed_m2.core.features import compute_obs_features
 from jed_m2.config import JEDM2Config, JEDM2MediumConfig
 from jed_m2.dataset import (
     AgentTrajectoryDataset,
@@ -236,4 +237,5 @@ __all__ = [
     "PreferenceTurn",
     "inject_spatial_coordinate_perturbation",
     "inject_action_primitive_substitution",
+    "compute_obs_features",
 ]

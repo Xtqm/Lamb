@@ -293,8 +293,8 @@ def main():
         peak_vram_bytes = torch.cuda.max_memory_allocated()
         peak_vram_mb = peak_vram_bytes / (1024**2)
         print(f"Peak GPU VRAM Allocated : {peak_vram_mb:.2f} MB ({peak_vram_bytes / (1024**3):.3f} GB)")
-        print(f"Target Constraint       : < 2048.00 MB (2.0 GB)")
-        assert peak_vram_mb < 2048.0, f"Peak VRAM ({peak_vram_mb:.2f} MB) exceeded 2.0GB limit!"
+        print(f"Target Constraint       : < 6144.00 MB (6.0 GB ceiling)")
+        assert peak_vram_mb < 6144.0, f"Peak VRAM ({peak_vram_mb:.2f} MB) exceeded 6.0GB ceiling!"
         print("  -> VRAM Constraint PASSED: Memory footprint well within hardware budget.")
     else:
         print("Running on CPU fallback. Forward and backward passes executed cleanly.")

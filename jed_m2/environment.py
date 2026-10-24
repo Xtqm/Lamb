@@ -18,83 +18,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 
 from jed_m2.config import JEDM2Config
+from jed_m2.core.types import UIElement
 from jed_m2.heads import ActionType
 
 
 # ==============================================================================
 # 1. UI Element & Environment State Data Structures
 # ==============================================================================
-
-@dataclass
-class UIElement:
-    """
-    Represents an interactable DOM / GUI element with spatial bounding box and attributes.
-    Normalized coordinates: x_min, y_min, x_max, y_max in [0, 1].
-    """
-
-    element_id: int
-    tag: str  # e.g., 'button', 'input', 'a', 'select', 'div', 'textarea'
-    role: str  # e.g., 'search_bar', 'submit_btn', 'nav_link', 'item_card', 'checkout_btn'
-    text: str  # Visible label or placeholder text
-    bbox: Tuple[float, float, float, float]  # (x_min, y_min, x_max, y_max)
-    value: str = ""  # Current typed or selected value
-    is_clickable: bool = True
-    is_input: bool = False
-    is_scrollable: bool = False
-    is_focused: bool = False
-
-    @property
-    def center(self) -> Tuple[float, float]:
-        """Returns normalized center point (cx, cy) of the bounding box."""
-        x_min, y_min, x_max, y_max = self.bbox
-        return ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0)
-
-    @property
-    def width(self) -> float:
-        """Normalized width in [0, 1]."""
-        return max(0.0, self.bbox[2] - self.bbox[0])
-
-    @property
-    def height(self) -> float:
-        """Normalized height in [0, 1]."""
-        return max(0.0, self.bbox[3] - self.bbox[1])
-
-    @property
-    def area(self) -> float:
-        """Normalized bounding box area."""
-        return self.width * self.height
-
-    def contains(self, x: float, y: float) -> bool:
-        """Checks if screen coordinate (x, y) falls inside this element's bounding box."""
-        x_min, y_min, x_max, y_max = self.bbox
-        return (x_min <= x <= x_max) and (y_min <= y <= y_max)
-
-    def to_dom_string(self) -> str:
-        """Serializes element to concise HTML-like DOM string representation."""
-        cx, cy = self.center
-        val_str = f" value='{self.value}'" if self.value else ""
-        focus_str = " focused='true'" if self.is_focused else ""
-        return (
-            f"<{self.tag} id={self.element_id} role='{self.role}' "
-            f"bbox='[{cx:.2f},{cy:.2f}]'{val_str}{focus_str}>{self.text}</{self.tag}>"
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Converts element attributes to dictionary."""
-        return {
-            "element_id": self.element_id,
-            "tag": self.tag,
-            "role": self.role,
-            "text": self.text,
-            "bbox": self.bbox,
-            "value": self.value,
-            "is_clickable": self.is_clickable,
-            "is_input": self.is_input,
-            "is_scrollable": self.is_scrollable,
-            "is_focused": self.is_focused,
-            "center": self.center,
-        }
-
 
 @dataclass
 class EnvironmentState:

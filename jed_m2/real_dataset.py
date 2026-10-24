@@ -28,6 +28,13 @@ import torch
 from torch.utils.data import Dataset
 
 from jed_m2.config import JEDM2Config
+from jed_m2.core.features import compute_obs_features
+from jed_m2.core.types import (
+    InteractiveElement,
+    InteractionTurn,
+    RealWebInteractionTurn,
+    UIElement,
+)
 from jed_m2.dataset import SimpleLAMTokenizer, TrajectoryBatch
 from jed_m2.heads import ActionType
 
@@ -39,33 +46,7 @@ logger = logging.getLogger("jed_m2.real_dataset")
 # 1. Interactive Element & Spatial Normalization
 # ==============================================================================
 
-@dataclass
-class InteractiveElement:
-    """Represents a salient interactable DOM element with spatial bounding box."""
-
-    element_id: int
-    tag: str  # e.g., 'button', 'input', 'a', 'select', 'textarea'
-    role: str  # e.g., 'button', 'link', 'textbox', 'combobox'
-    text: str  # Inner text, placeholder, or aria-label
-    bbox: Tuple[float, float, float, float]  # Normalized [x_min, y_min, x_max, y_max] in [0, 1]
-    attributes: Dict[str, str] = field(default_factory=dict)
-
-    @property
-    def center(self) -> Tuple[float, float]:
-        """Returns normalized center pointer coordinates (x, y) in [0, 1]."""
-        x_min, y_min, x_max, y_max = self.bbox
-        return ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0)
-
-    def to_dom_string(self) -> str:
-        """Serializes element to concise accessibility DOM representation."""
-        cx, cy = self.center
-        clean_text = self.text.replace("\n", " ").strip()
-        if len(clean_text) > 40:
-            clean_text = clean_text[:37] + "..."
-        attrs = ""
-        if "type" in self.attributes:
-            attrs += f" type='{self.attributes['type']}'"
-        return f"<{self.tag} id={self.element_id} role='{self.role}' bbox='[{cx:.2f},{cy:.2f}]'{attrs}>{clean_text}</{self.tag}>"
+# InteractiveElement is aliased to canonical UIElement from jed_m2.core.types
 
 
 def normalize_bbox(
@@ -304,27 +285,7 @@ class FastDOMParser(HTMLParser):
 # 3. Real Interaction Turn & Trajectory Data Structures
 # ==============================================================================
 
-@dataclass
-class RealWebInteractionTurn:
-    """Represents a single interaction turn step from real web traces (Mind2Web / WebArena)."""
-
-    turn_id: int
-    url: str
-    interactive_elements: List[InteractiveElement]
-    obs_text: str
-    obs_features: torch.Tensor  # Dense observation embedding [hidden_dim] for JEPA world model
-    thought: str  # System 2 reasoning rationale
-    action_type: ActionType  # Discrete action primitive
-    coordinates: Tuple[float, float]  # Continuous pointer target (x, y) in [0, 1]
-    argument: str  # String payload (typed text, target URL, scroll direction)
-    target_element_id: Optional[int] = None
-    reward: float = 0.0
-    screenshot: Optional[torch.Tensor] = None
-
-    @property
-    def dom_elements(self) -> List[InteractiveElement]:
-        return self.interactive_elements
-
+# RealWebInteractionTurn is aliased to canonical InteractionTurn from jed_m2.core.types
 
 @dataclass
 class RealWebTrajectorySample:
@@ -553,26 +514,7 @@ class RealWebTrajectoryDataset(Dataset):
         },
     ]
 
-    @staticmethod
-    def compute_obs_features(obs_text: str, elements: List[InteractiveElement], hidden_dim: int) -> torch.Tensor:
-        """Deterministic semantic observation embedding for JEPA world model."""
-        obs_words = obs_text.split()
-        obs_features = torch.zeros(hidden_dim, dtype=torch.float32)
-        for w_idx, word in enumerate(obs_words):
-            w_hash = int(hashlib.md5(word.encode("utf-8")).hexdigest()[:8], 16)
-            dim_idx = w_hash % hidden_dim
-            weight = 1.0 / (1.0 + (w_idx % 32) * 0.05)
-            obs_features[dim_idx] += weight
-        for el in elements:
-            if el.center:
-                cx_dim = int(el.center[0] * (hidden_dim - 1))
-                cy_dim = int(el.center[1] * (hidden_dim - 1))
-                obs_features[cx_dim] += 0.5
-                obs_features[cy_dim] += 0.5
-        f_norm = obs_features.norm(p=2)
-        if f_norm > 1e-6:
-            obs_features = obs_features / f_norm
-        return obs_features
+    compute_obs_features = staticmethod(compute_obs_features)
 
     def __init__(
         self,

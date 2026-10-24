@@ -21,50 +21,14 @@ import torch
 from torch.utils.data import Dataset
 
 from jed_m2.config import JEDM2Config
+from jed_m2.core.features import compute_obs_features
+from jed_m2.core.types import InteractionTurn, UIElement
 from jed_m2.heads import ActionType
 
 
 # ==============================================================================
 # 1. Trajectory Data Structures
 # ==============================================================================
-
-@dataclass
-class UIElement:
-    """Represents an interactable DOM / GUI element with spatial bounding box."""
-
-    element_id: int
-    tag: str  # e.g., 'button', 'input', 'a', 'select', 'div'
-    role: str  # e.g., 'search_button', 'text_input', 'nav_link', 'card'
-    text: str  # e.g., 'Add to Cart', 'Search Query', 'Submit'
-    bbox: Tuple[float, float, float, float]  # Normalized (x_min, y_min, x_max, y_max) in [0, 1]
-
-    @property
-    def center(self) -> Tuple[float, float]:
-        """Returns normalized center point (x, y) of the bounding box."""
-        x_min, y_min, x_max, y_max = self.bbox
-        return ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0)
-
-    def to_dom_string(self) -> str:
-        """Serializes element to concise DOM representation."""
-        cx, cy = self.center
-        return f"<{self.tag} id={self.element_id} role='{self.role}' bbox='[{cx:.2f},{cy:.2f}]'>{self.text}</{self.tag}>"
-
-
-@dataclass
-class InteractionTurn:
-    """Represents a single turn step in an agent interaction trajectory."""
-
-    turn_id: int
-    dom_elements: List[UIElement]
-    obs_text: str
-    obs_features: torch.Tensor  # Dense observation embedding [hidden_dim] for JEPA world model
-    thought: str  # System 2 reasoning rationale before action emission
-    action_type: ActionType  # Discrete action primitive
-    coordinates: Tuple[float, float]  # Continuous pointer target (x, y) in [0, 1]
-    argument: str  # String payload (typed text, target URL, API query)
-    reward: float = 0.0  # Environment reward signal
-    screenshot: Optional[torch.Tensor] = None  # Synthetic RGB screenshot image [3, H, W]
-
 
 @dataclass
 class TrajectorySample:
@@ -162,6 +126,8 @@ class SyntheticTrajectoryGenerator:
 
     DOM_TAGS = ["button", "input", "a", "select", "div", "textarea", "span"]
     ROLES = ["search_bar", "submit_btn", "nav_link", "filter_select", "item_card", "checkout_btn", "close_icon"]
+
+    compute_obs_features = staticmethod(compute_obs_features)
 
     # Trajectory workflow templates
     SCENARIOS = [
@@ -332,22 +298,7 @@ class SyntheticTrajectoryGenerator:
 
             # Continuous observation embedding [hidden_dim] for JEPA world model
             # Derived deterministically from DOM elements and observation structure
-            obs_words = obs_text.split()
-            obs_features = torch.zeros(self.hidden_dim, dtype=torch.float32)
-            for w_idx, word in enumerate(obs_words):
-                w_hash = int(hashlib.md5(word.encode("utf-8")).hexdigest()[:8], 16)
-                dim_idx = w_hash % self.hidden_dim
-                weight = 1.0 / (1.0 + (w_idx % 32) * 0.05)
-                obs_features[dim_idx] += weight
-            for el in dom_elements[:6]:
-                if el.center:
-                    cx_dim = int(el.center[0] * (self.hidden_dim - 1))
-                    cy_dim = int(el.center[1] * (self.hidden_dim - 1))
-                    obs_features[cx_dim] += 0.5
-                    obs_features[cy_dim] += 0.5
-            f_norm = obs_features.norm(p=2)
-            if f_norm > 1e-6:
-                obs_features = obs_features / f_norm
+            obs_features = compute_obs_features(obs_text, dom_elements[:6], self.hidden_dim)
 
             # Target coordinates
             if act_type in (ActionType.CLICK, ActionType.TYPE):

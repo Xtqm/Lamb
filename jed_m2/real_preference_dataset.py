@@ -23,11 +23,16 @@ import torch
 from torch.utils.data import Dataset
 
 from jed_m2.config import JEDM2Config
+from jed_m2.core.types import (
+    InteractiveElement,
+    InteractionTurn,
+    PreferenceTurn,
+    RealWebInteractionTurn,
+    UIElement,
+)
 from jed_m2.dataset import SimpleLAMTokenizer
 from jed_m2.heads import ActionType
 from jed_m2.real_dataset import (
-    InteractiveElement,
-    RealWebInteractionTurn,
     RealWebTrajectoryDataset,
     RealWebTrajectorySample,
 )
@@ -39,17 +44,7 @@ logger = logging.getLogger("jed_m2.real_preference_dataset")
 # 1. Preference Trajectory & Pair Containers
 # ==============================================================================
 
-@dataclass
-class PreferenceTurn:
-    """Represents a single turn step in a preference trajectory."""
-
-    turn_id: int
-    obs_text: str
-    thought: str
-    action_type: ActionType
-    coordinates: Tuple[float, float]
-    argument: str
-    is_perturbed: bool = False
+# PreferenceTurn is aliased to canonical InteractionTurn from jed_m2.core.types
 
 
 @dataclass
