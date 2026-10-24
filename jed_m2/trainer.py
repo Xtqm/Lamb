@@ -462,8 +462,10 @@ class JEDM2Trainer:
 
         checkpoint = torch.load(filepath, map_location=self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.global_step = checkpoint.get("global_step", checkpoint.get("step", 0))
         self.accum_step = checkpoint.get("accum_step", 0)
         self.epoch = checkpoint.get("epoch", 0)
