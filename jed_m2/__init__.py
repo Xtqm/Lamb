@@ -26,12 +26,14 @@ from jed_m2.benchmark import (
 )
 from jed_m2.browser import (
     PlaywrightBrowserEnvironment,
+    PlaywrightEnvironment,
     PlaywrightStepResult,
 )
 from jed_m2.playwright_env import (
     PlaywrightWebEnvironment,
     WebTaskOracle,
     get_default_web_oracles,
+    get_fixture_path,
 )
 from jed_m2.core.features import compute_obs_features
 from jed_m2.config import JEDM2Config, JEDM2MediumConfig
@@ -195,11 +197,13 @@ __all__ = [
     "compute_point_box_iou",
     "compute_shaped_reward",
     "WebOSEnvironment",
+    "PlaywrightEnvironment",
     "PlaywrightBrowserEnvironment",
     "PlaywrightStepResult",
     "PlaywrightWebEnvironment",
     "WebTaskOracle",
     "get_default_web_oracles",
+    "get_fixture_path",
     "EnvironmentState",
     "StepResult",
     "ScenarioDefinition",

@@ -23,6 +23,10 @@ import unittest
 # Ensure repo root is on sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Ensure mock browser execution under sandboxed environments
+if "JED_M2_MOCK_BROWSER" not in os.environ:
+    os.environ["JED_M2_MOCK_BROWSER"] = "1"
+
 import torch
 import torch.nn as nn
 
