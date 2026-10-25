@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 import hashlib
 import io
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -72,7 +73,28 @@ class WebTaskOracle:
     forbidden_selectors: List[str] = field(default_factory=list)  # Selectors that must be absent
     text_assertions: List[Tuple[str, str]] = field(default_factory=list)  # (selector, expected_substring)
     milestone_selectors: Dict[str, float] = field(default_factory=dict)  # selector -> milestone reward
+    target_bounding_boxes: List[Tuple[float, float, float, float]] = field(default_factory=list)  # (x1, y1, x2, y2)
     terminal_reward: float = 1.0
+
+    def compute_spatial_reward(self, coords: Tuple[float, float]) -> float:
+        """
+        Computes dense spatial IoU reward for CLICK coordinates against known target elements.
+        Returns continuous reward in [0.0, 0.5] if inside or close to target bounding box.
+        """
+        if not self.target_bounding_boxes:
+            return 0.0
+        cx, cy = coords
+        best_reward = 0.0
+        for (x1, y1, x2, y2) in self.target_bounding_boxes:
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                return 0.5
+            box_cx = (x1 + x2) / 2.0
+            box_cy = (y1 + y2) / 2.0
+            dist = math.sqrt((cx - box_cx) ** 2 + (cy - box_cy) ** 2)
+            if dist < 0.15:
+                proximity_reward = 0.5 * (1.0 - dist / 0.15)
+                best_reward = max(best_reward, proximity_reward)
+        return round(best_reward, 3)
 
     def evaluate_page(
         self,
@@ -191,23 +213,27 @@ def get_default_web_oracles() -> Dict[str, WebTaskOracle]:
             text_assertions=[("#cart-badge", "1")],
             milestone_selectors={"#cart-status": 0.5},
             terminal_reward=1.0,
+            target_bounding_boxes=[(0.35, 0.40, 0.50, 0.48), (0.72, 0.08, 0.85, 0.14)],
         ),
         "form_portal": WebTaskOracle(
             scenario_id="form_portal",
             required_selectors=["#confirm-banner"],
             text_assertions=[("#confirm-banner", "submitted successfully")],
             terminal_reward=1.0,
+            target_bounding_boxes=[(0.20, 0.45, 0.40, 0.52), (0.20, 0.15, 0.60, 0.22)],
         ),
         "travel": WebTaskOracle(
             scenario_id="travel",
             required_selectors=["#reservation-badge"],
             text_assertions=[("#reservation-badge", "Confirmed")],
             terminal_reward=1.0,
+            target_bounding_boxes=[(0.65, 0.30, 0.85, 0.38), (0.20, 0.10, 0.60, 0.18)],
         ),
         "os_admin": WebTaskOracle(
             scenario_id="os_admin",
             required_selectors=["#confirm-banner", "#reservation-badge"],
             terminal_reward=1.0,
+            target_bounding_boxes=[(0.20, 0.45, 0.40, 0.52)],
         ),
     }
 
@@ -685,28 +711,17 @@ class PlaywrightEnvironment:
             return None
 
     def _format_observation_text(self) -> str:
-        """Formats concise text observation summarizing current URL, title, and interactive DOM elements."""
+        """Formats concise text observation matching pretraining grammar: URL: ... | DOM: <button ...>."""
         if self.current_state is None:
             return "[Page: None]"
 
         url = self.current_state.url
-        title = self.current_state.title
         elements = self.current_state.elements
 
-        parts: List[str] = [
-            f"[URL] {url}",
-            f"[Title] {title}",
-            f"[Goal] {self.current_goal}",
-        ]
-
         if elements:
-            parts.append("[Interactive Elements]")
-            for el in elements[:25]:
-                parts.append(el.to_dom_string())
-        else:
-            parts.append("[Interactive Elements] (None found in active viewport)")
-
-        return "\n".join(parts)
+            dom_str = " ".join([el.to_dom_string() for el in elements[:64]])
+            return f"URL: {url} | DOM: {dom_str}"
+        return f"URL: {url} | DOM: [No interactive elements]"
 
     def _generate_obs_features(self) -> torch.Tensor:
         """Generates deterministic dense representation vector [hidden_dim] for JEPA world model."""
@@ -961,6 +976,11 @@ class PlaywrightEnvironment:
         # Programmatic Oracle Evaluation
         oracle_details: Optional[Dict[str, Any]] = None
         if self.oracle is not None:
+            # Dense spatial IoU reward shaping if CLICK action
+            if act_enum == ActionType.CLICK and hasattr(self.oracle, "compute_spatial_reward"):
+                spatial_r = self.oracle.compute_spatial_reward(coords)
+                step_reward += spatial_r
+
             dom_text = self._format_observation_text()
             oracle_r, goal_sat, oracle_details = self.oracle.evaluate_page(
                 page=page,

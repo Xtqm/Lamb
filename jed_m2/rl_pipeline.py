@@ -174,17 +174,38 @@ class TrajectoryRolloutSampler:
         turns: List[RolloutTurn] = []
         step_rewards: List[float] = []
 
+        # Goal conditioning matching pretraining grammar
+        goal_text = getattr(env, "current_goal", None) or (
+            getattr(env.active_scenario, "goal", "") if hasattr(env, "active_scenario") and env.active_scenario else ""
+        )
+        if goal_text:
+            goal_prompt = f"Goal: {goal_text}"
+            goal_tokens = self.tokenizer.encode(goal_prompt)
+            all_tokens.extend(goal_tokens)
+            all_mask.extend([False] * len(goal_tokens))
+            for tok in goal_tokens:
+                token_tensor = torch.tensor([tok], device=self.device, dtype=torch.long)
+                with torch.no_grad():
+                    last_lm_logits, last_action_out, recurrent_states = self.model.step(
+                        token_tensor,
+                        states=recurrent_states,
+                        pos=current_pos,
+                    )
+                current_pos += 1
+
         end_thought_id = self.tokenizer.special_tokens["</thought>"]
 
         for turn_idx in range(max_turns):
+            if current_pos >= self.config.max_seq_len - 64:
+                break
             turn_tokens: List[int] = []
             turn_mask: List[bool] = []
 
             # ------------------------------------------------------------------
-            # 1. Observation Prompt Ingestion
+            # 1. Observation Prompt Ingestion (uncapped up to 512 tokens)
             # ------------------------------------------------------------------
             obs_prompt = f"<obs> {obs_text} </obs> <thought>"
-            obs_tokens = self.tokenizer.encode(obs_prompt)[:24]
+            obs_tokens = self.tokenizer.encode(obs_prompt)[:512]
 
             all_tokens.extend(obs_tokens)
             all_mask.extend([False] * len(obs_tokens))
