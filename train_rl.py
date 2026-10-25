@@ -544,6 +544,17 @@ def main() -> None:
                     },
                     ckpt_path,
                 )
+                if iteration == args.iterations:
+                    calib_path = os.path.join(args.checkpoint_dir, "jed_m2_nano_dpo_calibrated.pt")
+                    torch.save(
+                        {
+                            "iteration": iteration,
+                            "model_state_dict": model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "metrics": metrics,
+                        },
+                        calib_path,
+                    )
 
     print("\n" + "=" * 80)
     print("      RL TRAINING RUN COMPLETED SUCCESSFULLY")

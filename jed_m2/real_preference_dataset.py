@@ -181,7 +181,7 @@ def tokenize_preference_trajectory(
     for turn in traj.turns:
         # 1. Observation context (non-trainable)
         obs_str = f"<obs> {turn.obs_text} </obs>"
-        obs_toks = tokenizer.encode(obs_str)[:32]
+        obs_toks = tokenizer.encode(obs_str)[:192]
         tokens.extend(obs_toks)
         mask.extend([False] * len(obs_toks))
         coords.extend([(0.5, 0.5)] * len(obs_toks))

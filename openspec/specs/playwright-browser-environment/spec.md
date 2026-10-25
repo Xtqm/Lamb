@@ -70,7 +70,7 @@ The browser environment SHALL support loading local static HTML fixtures and con
 - **THEN** Chromium navigates to the HTTP server address and establishes an interactive browsing session
 
 ### Requirement: Programmatic Oracle Task Verification and Reward Shaping
-The browser environment SHALL evaluate deterministic programmatic oracle verifiers against live page state to determine task success and compute step-level shaped rewards.
+The browser environment SHALL evaluate deterministic programmatic oracle verifiers against live page state to determine task success, award intermediate milestone rewards, and compute dense spatial IoU rewards against target element bounding boxes.
 
 #### Scenario: URL state matching oracle
 - **WHEN** an action completes and the oracle defines target URL patterns
@@ -79,6 +79,10 @@ The browser environment SHALL evaluate deterministic programmatic oracle verifie
 #### Scenario: DOM element presence and absence verification
 - **WHEN** a task requires verifying UI mutations (e.g., item added to cart, confirmation message displayed)
 - **THEN** the environment queries DOM selector state and awards milestone or terminal reward upon condition fulfillment
+
+#### Scenario: Spatial IoU reward shaping
+- **WHEN** the agent dispatches a CLICK action at coordinates $(cx, cy)$ in the presence of a known target element bounding box
+- **THEN** the oracle awards intermediate shaped reward based on whether the coordinates fall inside or within proximity of the target bounding box
 
 #### Scenario: Task goal satisfaction and episode termination
 - **WHEN** all required oracle conditions are satisfied or a valid FINISH action is dispatched
@@ -102,4 +106,3 @@ The browser environment SHALL implement the unified environment interface confor
 #### Scenario: Sandboxed mock mode execution
 - **WHEN** the browser environment is initialized with `mock_mode=True` or when browser process spawning fails in a sandboxed runtime
 - **THEN** the environment gracefully falls back to synthetic DOM tree generation and programmatic oracle evaluation without blocking process execution or raising unhandled IPC exceptions
-
