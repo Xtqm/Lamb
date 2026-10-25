@@ -789,9 +789,8 @@ class PlaywrightEnvironment:
 
         fixture_file = None
         if target_url is None:
-            fixture_file = self.fixture_path or (
-                get_fixture_path(self.active_scenario.scenario_id) if (self.active_scenario and target_scenario_id is not None) else None
-            )
+            active_sid = self.active_scenario.scenario_id if self.active_scenario else None
+            fixture_file = (get_fixture_path(active_sid) if active_sid else None) or self.fixture_path
 
         if page is not None and not self._synthetic_dom_fallback:
             if target_url and target_url != "about:blank":

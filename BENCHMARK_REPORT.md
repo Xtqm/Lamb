@@ -1,6 +1,6 @@
 # JED-M2 Large Action Model - Benchmark Evaluation Report
 
-**Generated:** 2026-10-23 13:01:15 UTC  
+**Generated:** 2026-10-25 02:16:54 UTC  
 **Benchmark Domain:** `real_web_val`  
 **Evaluation Device:** `cuda`  
 
@@ -13,13 +13,8 @@ Evaluated on 15 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on
 
 | Checkpoint | Episodes | Task SR (%) | Step SR | Macro F1 | Micro F1 | Coord MAE | Coord Tol Acc (eps<=0.05) | Efficiency Ratio | Latency (ms/step) | Throughput (tok/s) | Peak VRAM (MB) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **jed_m2_medium_step_1500** | 15 | 0.00% | 0.8303 | 0.8192 | 0.8440 | 0.4382 | 0.0111 | 0.0000 | 9695.06 ms | 38.5 | 600.7 MB |
-| **jed_m2_medium_step_3500** | 15 | 0.00% | 0.8103 | 0.8331 | 0.8257 | 0.3210 | 0.1192 | 0.0000 | 9664.19 ms | 38.3 | 600.5 MB |
-| **jed_m2_nano_step_500** | 15 | 0.00% | 0.5403 | 0.6214 | 0.5413 | 0.3946 | 0.0074 | 0.0000 | 3907.23 ms | 95.2 | 145.4 MB |
-| **jed_m2_nano_step_2000** | 15 | 0.00% | 0.8103 | 0.8331 | 0.8257 | 0.3604 | 0.1343 | 0.0000 | 3920.04 ms | 94.4 | 145.4 MB |
-| **jed_m2_nano_step_3000** | 15 | 0.00% | 0.8103 | 0.8331 | 0.8257 | 0.3618 | 0.1033 | 0.0000 | 4436.07 ms | 83.3 | 145.4 MB |
-| **jed_m2_nano_step_12200** | 15 | 0.00% | 0.7557 | 0.8343 | 0.7706 | 0.3485 | 0.0875 | 0.0000 | 3849.86 ms | 96.0 | 145.4 MB |
-| **jed_m2_nano_step_15800** | 15 | 0.00% | 0.8303 | 0.8192 | 0.8440 | 0.3203 | 0.1864 | 0.0000 | 4028.77 ms | 91.6 | 145.4 MB |
+| **jed_m2_nano_step_15800** | 15 | 0.00% | 0.8303 | 0.8192 | 0.8440 | 0.3203 | 0.1864 | 0.0000 | 4112.34 ms | 90.3 | 145.4 MB |
+| **jed_m2_nano_grpo_final** | 15 | 0.00% | 0.8303 | 0.8192 | 0.8440 | 0.3335 | 0.1743 | 0.0000 | 4234.44 ms | 87.9 | 145.4 MB |
 
 ---
 
@@ -27,13 +22,8 @@ Evaluated on 15 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on
 
 | Checkpoint | CLICK | TYPE | SCROLL | NAVIGATE | API_CALL | FINISH |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **jed_m2_medium_step_1500** | 0.915 | 0.000 | 1.000 | 1.000 | 1.000 | 1.000 |
-| **jed_m2_medium_step_3500** | 0.904 | 0.095 | 1.000 | 1.000 | 1.000 | 1.000 |
-| **jed_m2_nano_step_500** | 0.728 | 0.000 | 1.000 | 1.000 | 1.000 | 0.000 |
-| **jed_m2_nano_step_2000** | 0.904 | 0.095 | 1.000 | 1.000 | 1.000 | 1.000 |
-| **jed_m2_nano_step_3000** | 0.904 | 0.095 | 1.000 | 1.000 | 1.000 | 1.000 |
-| **jed_m2_nano_step_12200** | 0.868 | 0.138 | 1.000 | 1.000 | 1.000 | 1.000 |
 | **jed_m2_nano_step_15800** | 0.915 | 0.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| **jed_m2_nano_grpo_final** | 0.915 | 0.000 | 1.000 | 1.000 | 1.000 | 1.000 |
 
 ---
 

@@ -431,6 +431,17 @@ def main() -> None:
                     },
                     ckpt_path,
                 )
+                if iteration == args.iterations:
+                    final_path = os.path.join(args.checkpoint_dir, "jed_m2_nano_grpo_final.pt")
+                    torch.save(
+                        {
+                            "iteration": iteration,
+                            "model_state_dict": model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "metrics": metrics,
+                        },
+                        final_path,
+                    )
 
         if browser_env is not None:
             browser_env.close()

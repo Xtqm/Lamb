@@ -43,7 +43,7 @@ The system SHALL support online closed-loop multi-turn agent evaluation across i
 - **THEN** the agent navigates real web pages, captures screenshots and DOM snapshots, dispatches browser primitives, and records task completion metrics.
 
 ### Requirement: Comparative Checkpoint Benchmarking and Reporting
-The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) supporting configurable model scaling tiers (`--model_size {nano,medium}`), evaluating multiple model checkpoints side-by-side (including Step 2,500 baseline and Phase 14 models), rendering clean ASCII terminal comparison tables, and exporting formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).
+The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) supporting configurable model scaling tiers (`--model_size {nano,medium}`), evaluating multiple model checkpoints side-by-side (including Step 15,800 SFT and final online GRPO-trained checkpoints), rendering clean ASCII terminal comparison tables, and exporting formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).
 
 #### Scenario: Side-by-side checkpoint comparison
 - **WHEN** multiple checkpoint paths (e.g. SFT baseline vs. GRPO RL checkpoints) are passed to the comparative evaluation runner
@@ -60,6 +60,10 @@ The system SHALL provide a comparative evaluation runner and CLI script (`eval_b
 #### Scenario: Phase 14 comparative evaluation report
 - **WHEN** `eval_benchmarks.py` is run comparing Step 2,500 checkpoint against Phase 14 with active JEPA planning
 - **THEN** the report reflects throughput gains from parallel Blelloch scan, action accuracy on Mind2Web test splits, and planning improvements from JEPA rollouts
+
+#### Scenario: Real-web validation benchmark execution
+- **WHEN** evaluating on the `real_web_val` split
+- **THEN** the harness evaluates action accuracy, F1, coordinate MAE, and tolerance accuracy at $\epsilon \le 0.05$ across all validation episodes
 
 ### Requirement: Hardware and VRAM Constraint Adherence
 The evaluation harness SHALL execute with gradient calculation disabled (`torch.no_grad()`), supporting `torch.bfloat16` precision, and strictly adhere to a peak GPU VRAM allocation ceiling of 6.0 GB (6144.0 MB).

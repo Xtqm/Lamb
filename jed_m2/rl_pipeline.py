@@ -143,25 +143,27 @@ class TrajectoryRolloutSampler:
 
     def sample_trajectory(
         self,
-        env: WebOSEnvironment,
+        env: Any,
         temperature: float = 0.7,
         max_turns: int = 8,
+        scenario_id: Optional[str] = None,
     ) -> RolloutTrajectory:
         """
         Executes a single interactive episode in WebOSEnvironment with temperature-scaled exploration.
 
         Args:
-            env: WebOSEnvironment instance.
+            env: WebOSEnvironment or PlaywrightEnvironment instance.
             temperature: Sampling temperature for System 2 rationale tokens and System 1 action primitives.
             max_turns: Maximum allowed interaction turns before truncation.
+            scenario_id: Optional scenario identifier for scenario/fixture routing.
 
         Returns:
             RolloutTrajectory with token sequence, loss masks, and reward signals.
         """
         self.model.eval()
 
-        # Reset environment
-        init_res = env.reset()
+        # Reset environment with optional scenario routing
+        init_res = env.reset(scenario_id=scenario_id) if scenario_id else env.reset()
         obs_text = init_res.obs_text
 
         # Recurrent state buffers for O(1) step inference
@@ -509,7 +511,12 @@ class TrajectoryRolloutSampler:
 
             try:
                 for _ in range(group_size):
-                    traj = self.sample_trajectory(active_env, temperature=temperature, max_turns=max_turns)
+                    traj = self.sample_trajectory(
+                        active_env,
+                        temperature=temperature,
+                        max_turns=max_turns,
+                        scenario_id=scenario_id,
+                    )
                     group.append(traj)
             finally:
                 if owns_browser:
