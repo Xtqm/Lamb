@@ -14,6 +14,9 @@ import os
 import sys
 import time
 from typing import Dict, List, Optional, Tuple
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 
 from jed_m2.config import JEDM2Config, JEDM2MediumConfig
@@ -141,8 +144,8 @@ def parse_args() -> argparse.Namespace:
         "--env_type",
         type=str,
         default="webos",
-        choices=["webos", "browser"],
-        help="Environment backend for GRPO rollouts: 'webos' (procedural state machine) or 'browser' (headless Playwright)",
+        choices=["webos", "browser", "real_web"],
+        help="Environment backend for GRPO rollouts: 'webos' (procedural state machine), 'browser' (headless Playwright), or 'real_web' (offline DOM replay)",
     )
     parser.add_argument(
         "--scenarios",
@@ -151,6 +154,10 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated list of scenario IDs to sample rollouts from",
     )
     parser.add_argument("--max_turns", type=int, default=8, help="Maximum interaction turns per episode")
+    parser.add_argument("--max_steps", type=int, default=None, help="Alias for --iterations")
+    parser.add_argument("--dry_run", action="store_true", help="Perform dry-run verification of model and environment initialization then exit 0")
+    parser.add_argument("--raw_mind2web_dir", type=str, default="data/raw_mind2web", help="Directory for Mind2Web task chunk files")
+    parser.add_argument("--raw_webarena_path", type=str, default="data/raw_webarena/test.raw.json", help="Path to WebArena test.raw.json")
 
     # Hardware & Performance
     parser.add_argument("--seq_len", type=int, default=1024, help="Maximum sequence length")
@@ -184,6 +191,9 @@ def set_seed(seed: int) -> None:
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
+
+    if args.max_steps is not None:
+        args.iterations = args.max_steps
 
     # --------------------------------------------------------------------------
     # 1. Device and Precision Configuration
@@ -331,14 +341,32 @@ def main() -> None:
                 device=device,
                 dtype=dtype,
             )
+        elif args.env_type == "real_web":
+            from jed_m2.real_environment import RealTaskDOMEnvironment
+            print("[Init] Initializing RealTaskDOMEnvironment for real-task GRPO rollouts...")
+            browser_env = RealTaskDOMEnvironment(
+                raw_mind2web_dir=args.raw_mind2web_dir,
+                raw_webarena_path=args.raw_webarena_path,
+                max_elements=48,
+                hidden_dim=model_config.hidden_dim,
+                max_tasks=500,
+                seed=args.seed,
+            )
+
+        if args.dry_run:
+            print("[DryRun] Verified model, environments, and configuration. Exiting dry run successfully.")
+            return
 
         header_suffix = " | Curriculum" if args.curriculum else ""
-        print(f"[Header] Iteration | GRPO Loss | Mean Rew | Mean Adv | Mean KL | Clip Frac | Grad Norm | Tok/s | Peak VRAM{header_suffix}")
+        print(f"[Header] Iteration | GRPO Loss | Mean Rew | Mean Adv | Adv Var | Action Targets | Mean KL | Clip Frac | Grad Norm | Tok/s | Peak VRAM{header_suffix}")
         print("-" * 115)
 
         for iteration in range(1, args.iterations + 1):
             t_start = time.time()
-            scenario_id = scenarios[(iteration - 1) % len(scenarios)]
+            if args.env_type == "real_web" and browser_env and browser_env.tasks:
+                scenario_id = browser_env.tasks[(iteration - 1) % len(browser_env.tasks)].task_id
+            else:
+                scenario_id = scenarios[(iteration - 1) % len(scenarios)]
 
             # Dynamic curriculum turns & exploration annealing
             cur_turns = curriculum.max_turns if curriculum is not None else args.max_turns
@@ -366,23 +394,65 @@ def main() -> None:
                     print(f"  >>> [Curriculum] ADVANCED TO {curriculum.level_name.upper()}! <<<")
 
             # 2. Collate rollouts into batched training tensors with shaped rewards
-            batch = sampler.collate_rollouts(group, reward_mode="shaped")
+            batch = sampler.collate_rollouts(
+                group,
+                reward_mode="shaped",
+                cpu_offload=args.env_type == "real_web",
+            )
+            grouped_rewards = batch["rewards"].view(-1, args.group_size)
+            group_means = grouped_rewards.mean(dim=1, keepdim=True)
+            if args.group_size > 1:
+                group_stds = grouped_rewards.std(dim=1, keepdim=True).clamp(min=1e-8)
+            else:
+                group_stds = torch.ones_like(group_means)
+            batch["advantages"] = ((grouped_rewards - group_means) / group_stds).view(-1)
+            advantage_variance = float(batch["advantages"].var(unbiased=False).item())
+            action_target_count = int(batch["action_mask"].sum().item())
+            if action_target_count == 0:
+                raise RuntimeError("Real-task rollout batch contains no aligned discrete action targets.")
+            if torch.any(batch["action_mask"] & ~batch["mask"]):
+                raise RuntimeError("Discrete action targets must align with trainable action tokens.")
 
             # 3. Active Policy Gradient Step
             model.train()
             optimizer.zero_grad()
+            total_active_tokens = max(1, int(batch["mask"].sum().item()))
+            total_samples = batch["input_ids"].shape[0]
+            microbatch_size = min(2, total_samples)
+            metric_sums: Dict[str, float] = {}
 
-            loss, metrics = trainer.compute_loss(
-                input_ids=batch["input_ids"],
-                targets=batch["targets"],
-                mask=batch["mask"],
-                old_token_logps=batch["old_token_logps"],
-                rewards=batch["rewards"],
-                old_coord_logps=batch.get("old_coord_logps"),
-                target_coords=batch.get("target_coords"),
-            )
+            for start in range(0, total_samples, microbatch_size):
+                end = min(start + microbatch_size, total_samples)
+                microbatch = {
+                    key: value[start:end].to(device, non_blocking=device.type == "cuda")
+                    for key, value in batch.items()
+                    if isinstance(value, torch.Tensor)
+                }
+                micro_active_tokens = max(1, int(microbatch["mask"].sum().item()))
+                token_weight = micro_active_tokens / total_active_tokens
+                sample_weight = (end - start) / total_samples
 
-            loss.backward()
+                micro_loss, micro_metrics = trainer.compute_loss(
+                    input_ids=microbatch["input_ids"],
+                    targets=microbatch["targets"],
+                    mask=microbatch["mask"],
+                    old_token_logps=microbatch["old_token_logps"],
+                    rewards=microbatch["rewards"],
+                    old_coord_logps=microbatch.get("old_coord_logps"),
+                    target_coords=microbatch.get("target_coords"),
+                    advantages=microbatch["advantages"],
+                    action_type_targets=microbatch.get("action_type_targets"),
+                    action_mask=microbatch.get("action_mask"),
+                    old_action_logps=microbatch.get("old_action_logps"),
+                )
+
+                (micro_loss * token_weight).backward()
+                for key, value in micro_metrics.items():
+                    weight = sample_weight if key in ("mean_reward", "mean_advantage") else token_weight
+                    metric_sums[key] = metric_sums.get(key, 0.0) + value * weight
+                del microbatch, micro_loss
+
+            metrics = metric_sums
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
             optimizer.step()
 
@@ -391,8 +461,7 @@ def main() -> None:
 
             # Telemetry calculations
             elapsed = time.time() - t_start
-            active_tokens = int(batch["mask"].sum().item())
-            throughput = active_tokens / max(1e-4, elapsed)
+            throughput = total_active_tokens / max(1e-4, elapsed)
 
             peak_vram_mb = (
                 torch.cuda.max_memory_allocated() / (1024 * 1024)
@@ -411,6 +480,8 @@ def main() -> None:
                     f"Loss: {metrics['loss_grpo']:7.4f} | "
                     f"Rew: {metrics['mean_reward']:+6.3f} | "
                     f"Adv: {metrics['mean_advantage']:+6.3f} | "
+                    f"Var: {advantage_variance:6.3f} | "
+                    f"Acts: {action_target_count:3d} | "
                     f"KL: {metrics['mean_kl']:7.4f} | "
                     f"Clip: {metrics['clip_fraction'] * 100:5.1f}% | "
                     f"Grad: {grad_norm:5.2f} | "
@@ -443,7 +514,7 @@ def main() -> None:
                         final_path,
                     )
 
-        if browser_env is not None:
+        if browser_env is not None and hasattr(browser_env, "close"):
             browser_env.close()
 
     elif args.mode == "dpo":

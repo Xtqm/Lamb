@@ -55,6 +55,8 @@ FUTURE_PHASES_PROPOSALS.md
 
 # Mind2Web & Real Web Trajectory Datasets and Caches (Phase 14)
 data/raw_mind2web/
+data/raw_webarena/
+data/raw_weblinx/
 data/*.parquet
 data/*_cache/
 data/cache/

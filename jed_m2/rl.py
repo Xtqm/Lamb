@@ -266,6 +266,18 @@ def compute_token_log_probs(
     return token_logps, seq_logps
 
 
+def compute_action_type_log_probs(
+    action_logits: torch.Tensor,
+    action_targets: torch.Tensor,
+    action_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Computes selected discrete action log-probabilities at action positions."""
+    log_probs = F.log_softmax(action_logits.float(), dim=-1)
+    safe_targets = action_targets.clamp(min=0)
+    selected = log_probs.gather(dim=-1, index=safe_targets.unsqueeze(-1)).squeeze(-1)
+    return selected * action_mask.float()
+
+
 def calculate_dpo_loss(
     policy_chosen_logps: torch.Tensor,
     policy_rejected_logps: torch.Tensor,
@@ -340,6 +352,10 @@ def calculate_grpo_loss(
     ref_coord_logps: Optional[torch.Tensor] = None,
     policy_logits: Optional[torch.Tensor] = None,
     config: Optional[GRPOConfig] = None,
+    advantages: Optional[torch.Tensor] = None,
+    policy_action_logps: Optional[torch.Tensor] = None,
+    old_action_logps: Optional[torch.Tensor] = None,
+    ref_action_logps: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Computes Group Relative Policy Optimization (GRPO) loss with Joint Token and
@@ -359,27 +375,34 @@ def calculate_grpo_loss(
     batch_size = rewards.shape[0]
     group_size = cfg.group_size
 
-    if batch_size % group_size != 0:
+    if advantages is None:
+        if batch_size % group_size != 0:
+            raise ValueError(
+                f"Batch size {batch_size} must be divisible by group_size {group_size}"
+            )
+
+        num_groups = batch_size // group_size
+
+        # 1. Group advantage normalization: [num_groups, group_size]
+        rewards_grouped = rewards.view(num_groups, group_size)
+        group_means = rewards_grouped.mean(dim=1, keepdim=True)
+        group_stds = rewards_grouped.std(dim=1, keepdim=True).clamp(min=1e-8)
+        # [num_groups, group_size] -> [B]
+        advantages = ((rewards_grouped - group_means) / group_stds).view(batch_size)
+    elif advantages.shape != rewards.shape:
         raise ValueError(
-            f"Batch size {batch_size} must be divisible by group_size {group_size}"
+            f"Precomputed advantages shape {tuple(advantages.shape)} must match "
+            f"rewards shape {tuple(rewards.shape)}"
         )
-
-    num_groups = batch_size // group_size
-
-    # 1. Group advantage normalization: [num_groups, group_size]
-    rewards_grouped = rewards.view(num_groups, group_size)
-    group_means = rewards_grouped.mean(dim=1, keepdim=True)
-    group_stds = rewards_grouped.std(dim=1, keepdim=True).clamp(min=1e-8)
-    # [num_groups, group_size] -> [B]
-    advantages = ((rewards_grouped - group_means) / group_stds).view(batch_size)
 
     # 2. Joint Probability ratio r_{i, t}: [B, S]
     log_token_ratio = policy_token_logps - old_token_logps
+    joint_log_ratio = log_token_ratio
+    if policy_action_logps is not None and old_action_logps is not None:
+        joint_log_ratio = joint_log_ratio + (policy_action_logps - old_action_logps)
     if policy_coord_logps is not None and old_coord_logps is not None:
         log_coord_ratio = policy_coord_logps - old_coord_logps
-        joint_log_ratio = log_token_ratio + cfg.lambda_coord * log_coord_ratio
-    else:
-        joint_log_ratio = log_token_ratio
+        joint_log_ratio = joint_log_ratio + cfg.lambda_coord * log_coord_ratio
 
     joint_log_ratio = joint_log_ratio.clamp(min=-5.0, max=5.0)
     ratio = torch.exp(joint_log_ratio)
@@ -393,6 +416,9 @@ def calculate_grpo_loss(
     # 4. Token & Coordinate KL divergence penalty against reference policy
     kl_ratio = (ref_token_logps - policy_token_logps).clamp(min=-5.0, max=5.0)
     kl_penalty = torch.exp(kl_ratio) - kl_ratio - 1.0  # [B, S]
+    if policy_action_logps is not None and ref_action_logps is not None:
+        action_kl_ratio = (ref_action_logps - policy_action_logps).clamp(min=-5.0, max=5.0)
+        kl_penalty = kl_penalty + torch.exp(action_kl_ratio) - action_kl_ratio - 1.0
 
     if policy_coord_logps is not None and ref_coord_logps is not None:
         coord_kl = (policy_coord_logps - ref_coord_logps).abs().clamp(max=5.0)
@@ -577,6 +603,10 @@ class GRPOTrainer:
         rewards: torch.Tensor,
         old_coord_logps: Optional[torch.Tensor] = None,
         target_coords: Optional[torch.Tensor] = None,
+        advantages: Optional[torch.Tensor] = None,
+        action_type_targets: Optional[torch.Tensor] = None,
+        action_mask: Optional[torch.Tensor] = None,
+        old_action_logps: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Computes GRPO loss for grouped trajectory rollouts with optional joint spatial policy optimization.
@@ -589,6 +619,10 @@ class GRPOTrainer:
             rewards: Trajectory outcome rewards [B].
             old_coord_logps: Optional rollout policy coordinate log probabilities [B, S].
             target_coords: Optional target coordinate vectors [B, S, 2].
+            advantages: Optional precomputed group advantages for micro-batched updates [B].
+            action_type_targets: Optional discrete action IDs aligned to action-trigger tokens [B, S].
+            action_mask: Optional mask identifying action-trigger positions [B, S].
+            old_action_logps: Optional rollout action-type log probabilities [B, S].
 
         Returns:
             Tuple of (scalar_grpo_loss, metrics_dictionary).
@@ -606,6 +640,14 @@ class GRPOTrainer:
                 policy_out.action_output.coordinates, target_coords, sigma=self.config.coord_sigma
             )
 
+        policy_action_logps = None
+        if action_type_targets is not None and action_mask is not None:
+            policy_action_logps = compute_action_type_log_probs(
+                policy_out.action_output.action_type_logits,
+                action_type_targets,
+                action_mask,
+            )
+
         # Reference policy forward
         with torch.no_grad():
             ref_out = self.ref_model(input_ids=input_ids)
@@ -615,6 +657,13 @@ class GRPOTrainer:
             if target_coords is not None and old_coord_logps is not None:
                 ref_coord_logps = compute_coordinate_log_probs(
                     ref_out.action_output.coordinates, target_coords, sigma=self.config.coord_sigma
+                )
+            ref_action_logps = None
+            if action_type_targets is not None and action_mask is not None:
+                ref_action_logps = compute_action_type_log_probs(
+                    ref_out.action_output.action_type_logits,
+                    action_type_targets,
+                    action_mask,
                 )
 
         return calculate_grpo_loss(
@@ -628,4 +677,8 @@ class GRPOTrainer:
             ref_coord_logps=ref_coord_logps,
             policy_logits=policy_out.lm_logits,
             config=self.config,
+            advantages=advantages,
+            policy_action_logps=policy_action_logps,
+            old_action_logps=old_action_logps,
+            ref_action_logps=ref_action_logps,
         )

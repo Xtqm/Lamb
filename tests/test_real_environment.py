@@ -1,0 +1,97 @@
+"""
+Unit tests for JED-M2 RealTaskDOMEnvironment and RealTaskOracle.
+Verifies:
+- Task initialization, HTML DOM tree parsing, and interactive candidate extraction.
+- Programmatic multi-attribute oracle scoring across discrete action types, spatial IoU,
+  continuous Gaussian coordinate proximity, and textual arguments.
+
+STRICT CONVENTION: 100% native PyTorch without external compiled C++/CUDA packages.
+STRICT CONVENTION: Pure 7-bit ASCII logging (no Unicode box-drawing characters).
+"""
+
+import os
+import sys
+from pathlib import Path
+import unittest
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from jed_m2.heads import ActionType
+from jed_m2.real_environment import RealTaskDOMEnvironment, RealTaskOracle, RealTaskTurn
+
+
+class TestRealEnvironment(unittest.TestCase):
+    """Test suite for RealTaskDOMEnvironment and RealTaskOracle."""
+
+    def setUp(self):
+        self.env = RealTaskDOMEnvironment(
+            raw_mind2web_dir="data/raw_mind2web",
+            raw_webarena_path="data/raw_webarena/test.raw.json",
+            max_elements=32,
+            hidden_dim=512,
+            max_tasks=20,
+            seed=42,
+        )
+
+    def test_task_init(self):
+        """Verifies that RealTaskDOMEnvironment initializes tasks and parses initial DOM state."""
+        self.assertGreater(len(self.env.tasks), 0, "Environment must load at least one real web task.")
+
+        step_res = self.env.reset(task_idx=0)
+        self.assertIsNotNone(step_res.obs_text)
+        self.assertTrue(step_res.obs_text.startswith("URL:"))
+        self.assertIn("DOM:", step_res.obs_text)
+        self.assertEqual(step_res.obs_features.shape, (512,))
+        self.assertFalse(step_res.done)
+        self.assertGreater(len(self.env.active_elements), 0)
+        self.assertIsNotNone(self.env.current_goal)
+        print("PASS: test_task_init - Task initialized with goal:", self.env.current_goal)
+
+    def test_oracle_rewards(self):
+        """Verifies multi-attribute programmatic oracle reward computation."""
+        oracle = RealTaskOracle(sigma=0.10)
+        target_box = (0.20, 0.30, 0.40, 0.50)  # center = (0.30, 0.40)
+
+        turn = RealTaskTurn(
+            turn_id=0,
+            url="https://www.example.com",
+            html="<html><body><button id='target-btn' bbox='[200,300,400,500]'>Confirm</button></body></html>",
+            thought="Click confirm button",
+            action_type=ActionType.CLICK,
+            target_id=1,
+            target_bbox=target_box,
+            argument="",
+        )
+
+        elements = self.env.active_elements
+
+        # 1. Exact center click with correct action type
+        center_coords = (0.30, 0.40)
+        rew_perfect, info_perfect = oracle.compute_step_reward(
+            action_type=ActionType.CLICK,
+            coordinates=center_coords,
+            argument="",
+            expected_turn=turn,
+            available_elements=elements,
+        )
+        self.assertTrue(info_perfect["step_success"])
+        self.assertTrue(info_perfect["is_inside_target"])
+        self.assertGreater(rew_perfect, 2.0)
+
+        # 2. Wrong action type (TYPE instead of CLICK) and off-target click
+        off_coords = (0.85, 0.90)
+        rew_wrong, info_wrong = oracle.compute_step_reward(
+            action_type=ActionType.TYPE,
+            coordinates=off_coords,
+            argument="wrong",
+            expected_turn=turn,
+            available_elements=elements,
+        )
+        self.assertFalse(info_wrong["step_success"])
+        self.assertFalse(info_wrong["is_inside_target"])
+        self.assertLess(rew_wrong, rew_perfect)
+        print("PASS: test_oracle_rewards - Perfect reward:", rew_perfect, "| Wrong reward:", rew_wrong)
+
+
+if __name__ == "__main__":
+    unittest.main()

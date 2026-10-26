@@ -24,6 +24,7 @@ from jed_m2.environment import ScenarioDefinition, StepResult, WebOSEnvironment,
 from jed_m2.heads import ActionOutput, ActionType
 from jed_m2.model import JEDM2Model
 from jed_m2.rl import (
+    compute_action_type_log_probs,
     compute_coordinate_log_probs,
     compute_point_box_iou,
     compute_shaped_reward,
@@ -182,14 +183,14 @@ class TrajectoryRolloutSampler:
         )
         if goal_text:
             goal_prompt = f"Goal: {goal_text}"
-            goal_tokens = self.tokenizer.encode(goal_prompt)
+            goal_tokens = self.tokenizer.encode(goal_prompt)[:64]
             all_tokens.extend(goal_tokens)
             all_mask.extend([False] * len(goal_tokens))
-            for tok in goal_tokens:
-                token_tensor = torch.tensor([tok], device=self.device, dtype=torch.long)
+            goal_tensor = torch.tensor(goal_tokens, device=self.device, dtype=torch.long)
+            for i in range(len(goal_tokens)):
                 with torch.no_grad():
                     last_lm_logits, last_action_out, recurrent_states = self.model.step(
-                        token_tensor,
+                        goal_tensor[i : i + 1],
                         states=recurrent_states,
                         pos=current_pos,
                     )
@@ -204,10 +205,10 @@ class TrajectoryRolloutSampler:
             turn_mask: List[bool] = []
 
             # ------------------------------------------------------------------
-            # 1. Observation Prompt Ingestion (uncapped up to 512 tokens)
+            # 1. Observation Prompt Ingestion (budget up to 256 tokens)
             # ------------------------------------------------------------------
             obs_prompt = f"<obs> {obs_text} </obs> <thought>"
-            obs_tokens = self.tokenizer.encode(obs_prompt)[:512]
+            obs_tokens = self.tokenizer.encode(obs_prompt)[:256]
 
             all_tokens.extend(obs_tokens)
             all_mask.extend([False] * len(obs_tokens))
@@ -217,12 +218,11 @@ class TrajectoryRolloutSampler:
             # Step model recurrently through observation tokens
             last_lm_logits = None
             last_action_out = None
-            for tok in obs_tokens:
-                # [1] -> token tensor
-                token_tensor = torch.tensor([tok], device=self.device, dtype=torch.long)
+            obs_tensor = torch.tensor(obs_tokens, device=self.device, dtype=torch.long)
+            for i in range(len(obs_tokens)):
                 with torch.no_grad():
                     last_lm_logits, last_action_out, recurrent_states = self.model.step(
-                        token_tensor,
+                        obs_tensor[i : i + 1],
                         states=recurrent_states,
                         pos=current_pos,
                     )
@@ -524,6 +524,44 @@ class TrajectoryRolloutSampler:
 
             return group
 
+        if env_type == "real_web":
+            from jed_m2.real_environment import RealTaskDOMEnvironment
+            if browser_env is not None and isinstance(browser_env, RealTaskDOMEnvironment):
+                real_env = browser_env
+            else:
+                real_env = RealTaskDOMEnvironment(
+                    hidden_dim=self.config.hidden_dim,
+                    max_tasks=100,
+                    seed=seed or 42,
+                )
+
+            # Determine task for this group rollout so all G trajectories explore identical initial DOM
+            target_task_id = (
+                scenario_id
+                if scenario_id and scenario_id.lower() not in ("ecommerce", "form_portal", "travel", "real_web")
+                else None
+            )
+
+            if target_task_id:
+                real_env.reset(task_id=target_task_id)
+            elif scenario_id and scenario_id.isdigit():
+                real_env.reset(task_idx=int(scenario_id))
+            else:
+                real_env.reset()
+
+            fixed_task_id = real_env.active_task.task_id if real_env.active_task else None
+
+            for _ in range(group_size):
+                traj = self.sample_trajectory(
+                    real_env,
+                    temperature=temperature,
+                    max_turns=max_turns,
+                    scenario_id=fixed_task_id,
+                )
+                group.append(traj)
+
+            return group
+
         for _ in range(group_size):
             if generator is not None:
                 env = generator.generate(domain=scenario_id, seed=seed)
@@ -543,6 +581,7 @@ class TrajectoryRolloutSampler:
         self,
         trajectories: List[RolloutTrajectory],
         reward_mode: str = "shaped",
+        cpu_offload: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """
         Collates a list of rollout trajectories into batched tensors formatted for GRPOTrainer,
@@ -566,22 +605,29 @@ class TrajectoryRolloutSampler:
         batch_size = len(trajectories)
         if batch_size == 0:
             raise ValueError("Cannot collate empty trajectory list.")
+        batch_device = torch.device("cpu") if cpu_offload else self.device
 
         # Determine sequence lengths (input length = full_tokens - 1)
         seq_lens = [max(1, len(t.full_token_ids) - 1) for t in trajectories]
         max_seq_len = min(max(seq_lens), self.config.max_seq_len)
 
         padded_input_ids = torch.full(
-            (batch_size, max_seq_len), self.tokenizer.PAD_TOKEN_ID, dtype=torch.long, device=self.device
+            (batch_size, max_seq_len), self.tokenizer.PAD_TOKEN_ID, dtype=torch.long, device=batch_device
         )
         padded_targets = torch.full(
-            (batch_size, max_seq_len), -100, dtype=torch.long, device=self.device
+            (batch_size, max_seq_len), -100, dtype=torch.long, device=batch_device
         )
         padded_mask = torch.zeros(
-            (batch_size, max_seq_len), dtype=torch.bool, device=self.device
+            (batch_size, max_seq_len), dtype=torch.bool, device=batch_device
         )
         padded_target_coords = torch.zeros(
-            (batch_size, max_seq_len, 2), dtype=torch.float32, device=self.device
+            (batch_size, max_seq_len, 2), dtype=torch.float32, device=batch_device
+        )
+        action_type_targets = torch.zeros(
+            (batch_size, max_seq_len), dtype=torch.long, device=batch_device
+        )
+        action_mask = torch.zeros(
+            (batch_size, max_seq_len), dtype=torch.bool, device=batch_device
         )
 
         raw_rewards: List[float] = []
@@ -594,13 +640,13 @@ class TrajectoryRolloutSampler:
             s_len = min(len(tokens) - 1, max_seq_len)
             if s_len > 0:
                 padded_input_ids[b, :s_len] = torch.tensor(
-                    tokens[:s_len], dtype=torch.long, device=self.device
+                    tokens[:s_len], dtype=torch.long, device=batch_device
                 )
                 padded_targets[b, :s_len] = torch.tensor(
-                    tokens[1 : s_len + 1], dtype=torch.long, device=self.device
+                    tokens[1 : s_len + 1], dtype=torch.long, device=batch_device
                 )
                 padded_mask[b, :s_len] = torch.tensor(
-                    mask[1 : s_len + 1], dtype=torch.bool, device=self.device
+                    mask[1 : s_len + 1], dtype=torch.bool, device=batch_device
                 )
 
             # Assign coordinate targets from turns
@@ -609,9 +655,22 @@ class TrajectoryRolloutSampler:
                 t_len = len(turn.step_tokens)
                 if turn_pos < max_seq_len:
                     padded_target_coords[b, turn_pos : min(max_seq_len, turn_pos + t_len)] = torch.tensor(
-                        turn.coordinates, dtype=torch.float32, device=self.device
+                        turn.coordinates, dtype=torch.float32, device=batch_device
                     )
                 turn_pos += t_len
+
+            # Align action labels against the actual model inputs. The action-type head
+            # predicts after the <action> token, where the next-token loss is active.
+            action_trigger_id = self.tokenizer.special_tokens["<action>"]
+            if s_len > 0:
+                trigger_positions = torch.nonzero(
+                    (padded_input_ids[b, :s_len] == action_trigger_id)
+                    & padded_mask[b, :s_len],
+                    as_tuple=False,
+                ).flatten().tolist()
+                for action_pos, turn in zip(trigger_positions, traj.turns):
+                    action_type_targets[b, action_pos] = int(turn.action_type_id)
+                    action_mask[b, action_pos] = True
 
             # Guard: ensure at least one active token in mask to prevent zero-sum division
             if not padded_mask[b, :s_len].any() and s_len > 0:
@@ -645,18 +704,53 @@ class TrajectoryRolloutSampler:
             else:
                 raw_rewards.append(traj.cumulative_reward)
 
-        rewards_tensor = torch.tensor(raw_rewards, dtype=torch.float32, device=self.device)
+        rewards_tensor = torch.tensor(raw_rewards, dtype=torch.float32, device=batch_device)
 
         # Compute old logps under rollout policy using forward pass in torch.no_grad()
         self.model.eval()
-        with torch.no_grad():
-            rollout_out = self.model(input_ids=padded_input_ids)
-            old_token_logps, _ = compute_token_log_probs(
-                rollout_out.lm_logits, padded_targets, padded_mask
-            )
-            old_coord_logps = compute_coordinate_log_probs(
-                rollout_out.action_output.coordinates, padded_target_coords, sigma=0.05
-            )
+        if cpu_offload:
+            old_token_logps = torch.zeros_like(padded_targets, dtype=torch.float32)
+            old_coord_logps = torch.zeros_like(padded_targets, dtype=torch.float32)
+            old_action_logps = torch.zeros_like(padded_targets, dtype=torch.float32)
+            microbatch_size = min(2, batch_size)
+            with torch.no_grad():
+                for start in range(0, batch_size, microbatch_size):
+                    end = min(start + microbatch_size, batch_size)
+                    rollout_input_ids = padded_input_ids[start:end].to(self.device)
+                    rollout_targets = padded_targets[start:end].to(self.device)
+                    rollout_mask = padded_mask[start:end].to(self.device)
+                    rollout_coords = padded_target_coords[start:end].to(self.device)
+                    rollout_action_targets = action_type_targets[start:end].to(self.device)
+                    rollout_action_mask = action_mask[start:end].to(self.device)
+                    rollout_out = self.model(input_ids=rollout_input_ids)
+                    token_logps, _ = compute_token_log_probs(
+                        rollout_out.lm_logits, rollout_targets, rollout_mask
+                    )
+                    coord_logps = compute_coordinate_log_probs(
+                        rollout_out.action_output.coordinates, rollout_coords, sigma=0.05
+                    )
+                    action_logps = compute_action_type_log_probs(
+                        rollout_out.action_output.action_type_logits,
+                        rollout_action_targets,
+                        rollout_action_mask,
+                    )
+                    old_token_logps[start:end] = token_logps.cpu()
+                    old_coord_logps[start:end] = coord_logps.cpu()
+                    old_action_logps[start:end] = action_logps.cpu()
+        else:
+            with torch.no_grad():
+                rollout_out = self.model(input_ids=padded_input_ids)
+                old_token_logps, _ = compute_token_log_probs(
+                    rollout_out.lm_logits, padded_targets, padded_mask
+                )
+                old_coord_logps = compute_coordinate_log_probs(
+                    rollout_out.action_output.coordinates, padded_target_coords, sigma=0.05
+                )
+                old_action_logps = compute_action_type_log_probs(
+                    rollout_out.action_output.action_type_logits,
+                    action_type_targets,
+                    action_mask,
+                )
 
         # Compute group-normalized advantages: A_i = (r_i - mean) / (std + 1e-8)
         reward_mean = rewards_tensor.mean()
@@ -672,6 +766,9 @@ class TrajectoryRolloutSampler:
             "mask": padded_mask,
             "old_token_logps": old_token_logps,
             "old_coord_logps": old_coord_logps,
+            "action_type_targets": action_type_targets,
+            "action_mask": action_mask,
+            "old_action_logps": old_action_logps,
             "target_coords": padded_target_coords,
             "rewards": rewards_tensor,
             "advantages": advantages,
