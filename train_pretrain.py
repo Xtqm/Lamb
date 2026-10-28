@@ -12,6 +12,7 @@ from dataclasses import asdict
 from datetime import datetime
 import json
 import os
+from pathlib import Path
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -64,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset_size", type=int, default=5000, help="Number of real trajectory samples in train split")
     parser.add_argument("--eval_dataset_size", type=int, default=500, help="Number of samples in val split")
     parser.add_argument("--cache_dir", type=str, default="data/real_trajectories_cache", help="Directory for cached tensors")
+    parser.add_argument("--use_unified_dataset", action="store_true", help="Load unified multi-corpus pretraining dataset (Mind2Web + WebArena)")
     parser.add_argument("--force_rebuild_dataset", action="store_true", help="Force rebuild real trajectory cache")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
 
@@ -165,22 +167,35 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
 
     # Dataset & Collator Initialization
     print("\nLoading Real-World Web Trajectory Datasets...")
-    train_dataset = RealWebTrajectoryDataset(
-        config=config,
-        split="train",
-        dataset_size=args.dataset_size,
-        cache_dir=args.cache_dir,
-        force_rebuild=args.force_rebuild_dataset,
-        seed=args.seed,
-    )
-    val_dataset = RealWebTrajectoryDataset(
-        config=config,
-        split="val",
-        dataset_size=args.eval_dataset_size,
-        cache_dir=args.cache_dir,
-        force_rebuild=args.force_rebuild_dataset,
-        seed=args.seed + 10000,
-    )
+    if args.use_unified_dataset:
+        train_cache_path = Path(args.cache_dir) / f"unified_pretrain_train_{args.dataset_size}_h{config.hidden_dim}_seed{args.seed}.pt"
+        val_cache_path = Path(args.cache_dir) / f"unified_pretrain_val_{args.eval_dataset_size}_h{config.hidden_dim}_seed{args.seed + 10000}.pt"
+        if not train_cache_path.exists() or not val_cache_path.exists():
+            raise FileNotFoundError(
+                f"Unified dataset caches not found at {train_cache_path} or {val_cache_path}. "
+                "Please run data/build_unified_pretrain_dataset.py first."
+            )
+        print(f"Loading unified pretraining caches from {args.cache_dir}...")
+        train_dataset = torch.load(train_cache_path, map_location="cpu", weights_only=False)
+        val_dataset = torch.load(val_cache_path, map_location="cpu", weights_only=False)
+        print(f"Loaded {len(train_dataset)} unified train trajectories and {len(val_dataset)} val trajectories.")
+    else:
+        train_dataset = RealWebTrajectoryDataset(
+            config=config,
+            split="train",
+            dataset_size=args.dataset_size,
+            cache_dir=args.cache_dir,
+            force_rebuild=args.force_rebuild_dataset,
+            seed=args.seed,
+        )
+        val_dataset = RealWebTrajectoryDataset(
+            config=config,
+            split="val",
+            dataset_size=args.eval_dataset_size,
+            cache_dir=args.cache_dir,
+            force_rebuild=args.force_rebuild_dataset,
+            seed=args.seed + 10000,
+        )
     print(f"Train Dataset Size    : {len(train_dataset)} trajectories")
     print(f"Validation Dataset    : {len(val_dataset)} trajectories")
 

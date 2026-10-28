@@ -829,8 +829,10 @@ class RealWebTrajectoryDataset(Dataset):
                     op_dict.get("op") or op_dict.get("original_op") or "CLICK"
                 ).upper() if isinstance(op_dict, dict) else str(op_dict).upper()
 
-                if "CLICK" in op_str or "SELECT" in op_str or "HOVER" in op_str:
+                if "CLICK" in op_str or "HOVER" in op_str:
                     action_type = ActionType.CLICK
+                elif "SELECT" in op_str:
+                    action_type = ActionType.SELECT
                 elif "TYPE" in op_str or "ENTER" in op_str or "INPUT" in op_str:
                     action_type = ActionType.TYPE
                 elif "SCROLL" in op_str:
@@ -1259,8 +1261,10 @@ class RealWebTrajectoryDataset(Dataset):
                 # Action type mapping
                 op_dict = act_info.get("operation", {})
                 op_str = op_dict.get("op", "CLICK").upper() if isinstance(op_dict, dict) else str(op_dict).upper()
-                if "CLICK" in op_str or "SELECT" in op_str:
+                if "CLICK" in op_str:
                     action_type = ActionType.CLICK
+                elif "SELECT" in op_str:
+                    action_type = ActionType.SELECT
                 elif "TYPE" in op_str or "ENTER" in op_str or "INPUT" in op_str:
                     action_type = ActionType.TYPE
                 elif "SCROLL" in op_str:
