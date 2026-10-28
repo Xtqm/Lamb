@@ -13,21 +13,31 @@ STRICT BUILD RULE: Pure Python / PyTorch without external unvetted dependencies.
 """
 
 import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 import random
+import re
 import sys
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
 import urllib.request
 import urllib.error
+import urllib.parse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("mind2web_downloader")
 
-HF_BASE_URL = "https://huggingface.co/datasets/osunlp/Mind2Web/resolve/main"
+HF_DATASET_ID = "osunlp/Mind2Web"
+HF_REVISION = "6314166657eec4aa0e22c00f8d801e609ce8e80f"
+HF_API_TREE_URL = "https://huggingface.co/api/datasets/osunlp/Mind2Web/tree"
+HF_RESOLVE_URL = "https://huggingface.co/datasets/osunlp/Mind2Web/resolve"
+HF_LICENSE = "CC-BY-4.0"
+OFFICIAL_TRAIN0_SHA256 = "c8b622901057bca813a6d171733c41e4fc266c2902a23d63b9094c0add3f8f2c"
 
 SAMPLE_REAL_DOMAINS = [
     "amazon.com", "delta.com", "wikipedia.org", "ebay.com", "homedepot.com",
@@ -235,65 +245,291 @@ def generate_offline_raw_mind2web(
     return stats
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while True:
+            chunk = source.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _hf_headers() -> Dict[str, str]:
+    headers = {"User-Agent": "JED-M2-LAM/1.0"}
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _official_train_files(revision: str, timeout: int = 30) -> List[Dict[str, Any]]:
+    """Reads official file paths and Xet SHA-256 values from the Hugging Face API."""
+    url = (
+        f"{HF_API_TREE_URL}/{urllib.parse.quote(revision, safe='')}/data/train"
+        "?recursive=false&expand=true&limit=1000"
+    )
+    request = urllib.request.Request(url, headers=_hf_headers())
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        entries = json.loads(response.read().decode("utf-8"))
+
+    indexed: List[Dict[str, Any]] = []
+    for entry in entries:
+        source_path = entry.get("path", "")
+        match = re.fullmatch(r"data/train/(train_\d+\.json)", source_path)
+        if not match or entry.get("type") != "file":
+            continue
+        lfs = entry.get("lfs") or {}
+        expected_sha = str(lfs.get("oid", "")).removeprefix("sha256:").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+            continue
+        indexed.append({
+            "name": match.group(1),
+            "source_path": source_path,
+            "size": int(entry.get("size", 0)),
+            "sha256": expected_sha,
+        })
+
+    indexed.sort(key=lambda item: int(re.search(r"_(\d+)\.json$", item["name"]).group(1)))
+    if not indexed:
+        raise RuntimeError("Hugging Face returned no Mind2Web train JSON files with SHA-256 metadata.")
+    return indexed
+
+
+def _find_local_train_file(output_dir: Path, name: str) -> Optional[Path]:
+    candidates = (output_dir / name, output_dir / "train" / name)
+    existing = [path for path in candidates if path.is_file()]
+    if len(existing) > 1 and len({_sha256_file(path) for path in existing}) > 1:
+        raise RuntimeError(f"Conflicting local copies of {name} exist in {output_dir}.")
+    return existing[0] if existing else None
+
+
+def _download_verified_file(
+    file_info: Dict[str, Any], output_dir: Path, revision: str, timeout: int = 120
+) -> Path:
+    name = file_info["name"]
+    target = output_dir / "train" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    url = f"{HF_RESOLVE_URL}/{urllib.parse.quote(revision, safe='')}/{file_info['source_path']}"
+    request = urllib.request.Request(url, headers=_hf_headers())
+    temporary_path: Optional[Path] = None
+    digest = hashlib.sha256()
+    received = 0
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", prefix=f".{name}.", suffix=".download", dir=target.parent, delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                while True:
+                    chunk = response.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    temporary.write(chunk)
+                    digest.update(chunk)
+                    received += len(chunk)
+                    if received % (256 * 1024 * 1024) < len(chunk):
+                        logger.info(
+                            "Downloaded %s: %.1f / %.1f MiB",
+                            name, received / 1048576, file_info["size"] / 1048576,
+                        )
+
+        if received != file_info["size"]:
+            raise RuntimeError(f"Size mismatch for {name}: received {received}, expected {file_info['size']} bytes.")
+        if digest.hexdigest() != file_info["sha256"]:
+            raise RuntimeError(f"SHA-256 verification failed for {name}.")
+        if target.exists():
+            raise FileExistsError(f"Refusing to replace existing data file: {target}")
+        os.replace(temporary_path, target)
+        temporary_path = None
+        return target
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
+
+
+def _write_source_manifest(output_dir: Path, manifest: Dict[str, Any]) -> Path:
+    manifest_path = output_dir / "source_manifest.json"
+    serialized = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    if manifest_path.exists():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Existing source manifest is unreadable: {manifest_path}") from exc
+        if existing.get("files") != manifest.get("files") or existing.get("dataset") != manifest.get("dataset"):
+            raise RuntimeError(
+                f"Existing source manifest differs from this corpus: {manifest_path}. "
+                "Choose a new output directory rather than replacing it."
+            )
+        return manifest_path
+
+    temporary_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=".source_manifest.", suffix=".tmp",
+            dir=output_dir, delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(serialized)
+        os.replace(temporary_path, manifest_path)
+        temporary_path = None
+        return manifest_path
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
+
+
+def acquire_real_mind2web(
+    output_dir: str = "data/raw_mind2web", revision: str = HF_REVISION
+) -> Dict[str, Any]:
+    """Verifies local official train chunks or streams them from the official HF dataset."""
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    verification = "official_sha256"
+    try:
+        official_files = _official_train_files(revision)
+    except Exception as exc:
+        logger.warning("Could not retrieve official file checksums (%s); checking the complete local corpus.", exc)
+        local_names = {path.name for path in out_path.glob("train_*.json")}
+        nested_train = out_path / "train"
+        if nested_train.exists():
+            local_names.update(path.name for path in nested_train.glob("train_*.json") if path.is_file())
+        expected_names = {f"train_{index}.json" for index in range(11)}
+        if local_names != expected_names:
+            raise RuntimeError(
+                "The official Mind2Web source is unreachable and the complete local training corpus was not found. "
+                "Acquire the official osunlp/Mind2Web training files or use --mode fixtures explicitly."
+            ) from exc
+        verification = "official_train0_sha256_plus_local_sha256"
+        official_files = [
+            {"name": name, "source_path": f"data/train/{name}", "size": 0, "sha256": None}
+            for name in sorted(local_names, key=lambda value: int(re.search(r"_(\d+)\.json$", value).group(1)))
+        ]
+
+    file_records: List[Dict[str, Any]] = []
+    for info in official_files:
+        local_path = _find_local_train_file(out_path, info["name"])
+        if local_path is None:
+            if info["sha256"] is None:
+                raise RuntimeError(f"No verified remote digest is available to acquire {info['name']}.")
+            local_path = _download_verified_file(info, out_path, revision)
+
+        actual_size = local_path.stat().st_size
+        actual_sha = _sha256_file(local_path)
+        expected_sha = info.get("sha256")
+        if expected_sha and actual_sha != expected_sha:
+            raise RuntimeError(f"Local SHA-256 does not match the official source for {info['name']}.")
+        if info.get("size") and actual_size != info["size"]:
+            raise RuntimeError(f"Local size does not match the official source for {info['name']}.")
+        train0_match = info["name"] == "train_0.json" and actual_sha == OFFICIAL_TRAIN0_SHA256
+        if info.get("size") == 0 and info["name"] == "train_0.json" and not train0_match:
+            raise RuntimeError("The local train_0.json checksum does not match the published Mind2Web file.")
+        relative_path = str(local_path.relative_to(out_path)).replace(os.sep, "/")
+        file_records.append({
+            "path": relative_path,
+            "size_bytes": actual_size,
+            "sha256": actual_sha,
+            "upstream_sha256_verified": bool(expected_sha and actual_sha == expected_sha) or train0_match,
+        })
+
+    manifest = {
+        "dataset": HF_DATASET_ID,
+        "source_url": "https://huggingface.co/datasets/osunlp/Mind2Web",
+        "revision": revision if verification == "official_sha256" else "local-unpinned",
+        "license": HF_LICENSE,
+        "upstream_split": "train",
+        "verification": verification,
+        "verified_at_utc": datetime.now(timezone.utc).isoformat(),
+        "files": file_records,
+    }
+    manifest_path = _write_source_manifest(out_path, manifest)
+    return {
+        "files": len(file_records),
+        "bytes": sum(item["size_bytes"] for item in file_records),
+        "verification": verification,
+        "manifest": str(manifest_path),
+    }
+
+
 def download_or_generate_mind2web(
     output_dir: str = "data/raw_mind2web",
     splits: Optional[List[str]] = None,
-    max_tasks_per_split: int = 15,
+    max_tasks_per_split: Optional[int] = None,
     force_offline: bool = False,
     seed: int = 42,
-) -> Dict[str, int]:
-    """
-    Attempts to stream official Mind2Web dataset; gracefully falls back to structured offline format
-    if Hugging Face is unreachable or in sandboxed environment.
-    """
-    if splits is None:
-        splits = ["train", "val", "test"]
+    mode: str = "real",
+    revision: str = HF_REVISION,
+) -> Dict[str, Any]:
+    """Acquire official Mind2Web training data or create explicitly requested fixtures."""
+    if force_offline:
+        mode = "fixtures"
+    if mode == "real":
+        if splits and any(split != "train" for split in splits):
+            raise ValueError(
+                "Official Mind2Web acquisition supplies the train split only; "
+                "derive validation/test from a site-held-out manifest."
+            )
+        summary = acquire_real_mind2web(output_dir=output_dir, revision=revision)
+        logger.info("Verified Mind2Web training corpus: %s", summary)
+        return summary
+    if mode != "fixtures":
+        raise ValueError("mode must be either 'real' or 'fixtures'.")
 
-    out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-
-    # Check if network download is requested and possible
-    network_success = False
-    if not force_offline:
-        try:
-            logger.info("Checking connectivity to Hugging Face Mind2Web repository...")
-            test_url = f"{HF_BASE_URL}/README.md"
-            req = urllib.request.Request(test_url, headers={"User-Agent": "JED-M2-LAM/1.0"})
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                if resp.status == 200:
-                    logger.info("Successfully connected to Hugging Face dataset host.")
-                    network_success = True
-        except Exception as e:
-            logger.info(f"Network streaming unavailable ({e}). Falling back to local offline Mind2Web generator.")
-
-    # Generate structured real Mind2Web corpus files
+    fixture_splits = splits or ["train", "val", "test"]
     stats = generate_offline_raw_mind2web(
-        output_dir=out_path,
-        splits=splits,
-        num_samples_per_split=max_tasks_per_split,
+        output_dir=Path(output_dir),
+        splits=fixture_splits,
+        num_samples_per_split=max_tasks_per_split if max_tasks_per_split is not None else 15,
         seed=seed,
     )
+    fixture_manifest = {
+        "dataset": "JED-M2 procedural fixtures",
+        "source_url": None,
+        "revision": "local-generator",
+        "license": "not-applicable",
+        "upstream_split": None,
+        "verification": "synthetic_fixture_generation",
+        "seed": seed,
+        "files": stats,
+    }
+    out_path = Path(output_dir)
+    (out_path / "fixture_manifest.json").write_text(
+        json.dumps(fixture_manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    logger.warning("Generated synthetic fixtures only; they are not real Mind2Web data.")
     return stats
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Mind2Web Dataset Streaming Downloader & Ingestion")
     parser.add_argument("--output_dir", type=str, default="data/raw_mind2web", help="Output directory for raw Mind2Web files")
-    parser.add_argument("--splits", nargs="+", default=["train", "val", "test"], help="Dataset splits to download or generate")
-    parser.add_argument("--max_tasks", type=int, default=15, help="Number of tasks per split to generate/download")
-    parser.add_argument("--force_offline", action="store_true", help="Force deterministic offline sample generation")
+    parser.add_argument("--mode", choices=["real", "fixtures"], default="real", help="Acquire official Mind2Web training traces or explicitly generate synthetic fixtures")
+    parser.add_argument("--splits", nargs="+", default=["train"], help="Fixture splits; real acquisition accepts train only")
+    parser.add_argument("--max_tasks", type=int, default=None, help="Fixture task count per split (ignored by real acquisition)")
+    parser.add_argument("--force_offline", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--revision", type=str, default=HF_REVISION, help="Pinned Hugging Face dataset revision")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    logger.info(f"Starting Mind2Web corpus download/generation into {args.output_dir}...")
+    workflow = "fixture generation" if args.mode == "fixtures" or args.force_offline else "real-data acquisition"
+    logger.info("Starting Mind2Web %s in %s...", workflow, args.output_dir)
     summary = download_or_generate_mind2web(
         output_dir=args.output_dir,
         splits=args.splits,
         max_tasks_per_split=args.max_tasks,
         force_offline=args.force_offline,
         seed=args.seed,
+        mode=args.mode,
+        revision=args.revision,
     )
-    logger.info(f"Mind2Web Corpus Generation Complete: {summary}")
+    logger.info("Mind2Web workflow complete: %s", summary)

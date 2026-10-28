@@ -774,7 +774,17 @@ class WebOSEnvironment:
                 # Missed spatial hit
                 step_reward -= 0.10
 
-        # 2. TYPE Transition
+        # 2. SELECT Transition
+        elif act_enum == ActionType.SELECT:
+            hit_element = self.hit_test(coords[0], coords[1])
+            if hit_element is not None and (hit_element.tag == "select" or hit_element.role in ("combobox", "listbox")):
+                hit_element.value = arg_str
+                action_success = True
+                step_reward += 0.15
+            else:
+                step_reward -= 0.10
+
+        # 3. TYPE Transition
         elif act_enum == ActionType.TYPE:
             hit_element = self.hit_test(coords[0], coords[1])
             target_el = hit_element if (hit_element and hit_element.is_input) else None

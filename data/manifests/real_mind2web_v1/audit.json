@@ -1,0 +1,166 @@
+{
+  "actions_without_candidate_geometry": 425,
+  "actions_without_original_target": 2661,
+  "actions_without_positive_candidates": 413,
+  "actions_without_rationale": 7775,
+  "category_counts": {
+    "domain": {
+      "entertainment": 261,
+      "shopping": 281,
+      "travel": 467
+    },
+    "subdomain": {
+      "airlines": 106,
+      "auto": 57,
+      "car rental": 43,
+      "department": 15,
+      "digital": 28,
+      "event": 58,
+      "fashion": 32,
+      "game": 41,
+      "general": 99,
+      "ground": 72,
+      "hotel": 32,
+      "movie": 62,
+      "music": 46,
+      "other": 105,
+      "restaurant": 63,
+      "speciality": 96,
+      "sports": 54
+    }
+  },
+  "cross_site_duplicate_snapshots": 0,
+  "diversity_failures": {},
+  "duplicate_annotation_ids": [],
+  "duplicate_task_ids": 0,
+  "invalid_records": 0,
+  "leakage_snapshot_count": 0,
+  "leakage_snapshot_examples": [],
+  "missing_observation_actions": 0,
+  "operations": {
+    "CLICK": 6513,
+    "SELECT": 326,
+    "TYPE": 936
+  },
+  "original_target_actions": 5114,
+  "pairwise_website_overlap": 0,
+  "positive_candidate_actions": 7362,
+  "rationale_actions": 0,
+  "snapshot_hashes": 7775,
+  "source_actions": 7775,
+  "source_records": 1009,
+  "splits": {
+    "test": {
+      "actions": 1178,
+      "actions_without_observation": 0,
+      "domain_categories": {
+        "entertainment": 38,
+        "shopping": 41,
+        "travel": 68
+      },
+      "label_coverage": {
+        "candidate_bbox": 1103,
+        "original_target": 761,
+        "positive_candidates": 1108,
+        "rationale": 0
+      },
+      "operations": {
+        "CLICK": 986,
+        "SELECT": 54,
+        "TYPE": 138
+      },
+      "source_actions": 1178,
+      "subdomain_categories": {
+        "airlines": 9,
+        "auto": 16,
+        "game": 10,
+        "general": 38,
+        "ground": 11,
+        "music": 28,
+        "other": 15,
+        "restaurant": 20
+      },
+      "tasks": 147,
+      "websites": 11
+    },
+    "train": {
+      "actions": 5607,
+      "actions_without_observation": 0,
+      "domain_categories": {
+        "entertainment": 186,
+        "shopping": 201,
+        "travel": 331
+      },
+      "label_coverage": {
+        "candidate_bbox": 5321,
+        "original_target": 3706,
+        "positive_candidates": 5328,
+        "rationale": 0
+      },
+      "operations": {
+        "CLICK": 4693,
+        "SELECT": 246,
+        "TYPE": 668
+      },
+      "source_actions": 5607,
+      "subdomain_categories": {
+        "airlines": 78,
+        "auto": 28,
+        "car rental": 35,
+        "department": 15,
+        "digital": 28,
+        "event": 46,
+        "fashion": 32,
+        "game": 31,
+        "general": 61,
+        "ground": 32,
+        "hotel": 32,
+        "movie": 62,
+        "music": 18,
+        "other": 78,
+        "restaurant": 43,
+        "speciality": 70,
+        "sports": 29
+      },
+      "tasks": 718,
+      "websites": 51
+    },
+    "val": {
+      "actions": 990,
+      "actions_without_observation": 0,
+      "domain_categories": {
+        "entertainment": 37,
+        "shopping": 39,
+        "travel": 68
+      },
+      "label_coverage": {
+        "candidate_bbox": 926,
+        "original_target": 647,
+        "positive_candidates": 926,
+        "rationale": 0
+      },
+      "operations": {
+        "CLICK": 834,
+        "SELECT": 26,
+        "TYPE": 130
+      },
+      "source_actions": 990,
+      "subdomain_categories": {
+        "airlines": 19,
+        "auto": 13,
+        "car rental": 8,
+        "event": 12,
+        "ground": 29,
+        "other": 12,
+        "speciality": 26,
+        "sports": 25
+      },
+      "tasks": 144,
+      "websites": 11
+    }
+  },
+  "unique_tasks": 1009,
+  "usable_actions": 7775,
+  "valid_target_bbox_actions": 7350,
+  "website_count": 73
+}

@@ -936,6 +936,30 @@ class PlaywrightEnvironment:
                     action_success = True
                     if hit_element is not None:
                         step_reward += 0.15
+                elif act_enum == ActionType.SELECT:
+                    selection_succeeded = page.evaluate(
+                        """({x, y, value}) => {
+                            const select = [...document.querySelectorAll('select')].find((node) => {
+                                const rect = node.getBoundingClientRect();
+                                return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+                            });
+                            if (!select) return false;
+                            const option = [...select.options].find((item) =>
+                                item.value === value || item.label === value || item.textContent.trim() === value
+                            );
+                            if (!option) return false;
+                            select.value = option.value;
+                            select.dispatchEvent(new Event('input', { bubbles: true }));
+                            select.dispatchEvent(new Event('change', { bubbles: true }));
+                            return true;
+                        }""",
+                        {"x": pixel_x, "y": pixel_y, "value": arg_str},
+                    )
+                    action_success = bool(selection_succeeded)
+                    if action_success:
+                        step_reward += 0.10
+                    else:
+                        action_error = "No matching select control or option at the predicted coordinates"
                 elif act_enum == ActionType.TYPE:
                     text_to_type = arg_str if arg_str else "test"
                     page.keyboard.type(text_to_type, delay=20)
@@ -969,6 +993,13 @@ class PlaywrightEnvironment:
             action_success = True
             if act_enum == ActionType.CLICK and hit_element is not None:
                 step_reward += 0.15
+            elif act_enum == ActionType.SELECT and hit_element is not None:
+                if hit_element.tag == "select" or hit_element.role in ("combobox", "listbox"):
+                    hit_element.value = arg_str
+                    step_reward += 0.10
+                else:
+                    action_success = False
+                    action_error = "Predicted target is not a select control"
             elif act_enum == ActionType.TYPE:
                 step_reward += 0.10
 

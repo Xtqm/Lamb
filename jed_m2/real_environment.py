@@ -130,7 +130,7 @@ class RealTaskOracle:
 
         # 3. Textual Argument Alignment for TYPE Actions
         r_arg = 0.0
-        if expected_turn.action_type == ActionType.TYPE:
+        if expected_turn.action_type in (ActionType.TYPE, ActionType.SELECT):
             gt_arg = expected_turn.argument.strip().lower()
             pred_arg = (argument or "").strip().lower()
             if gt_arg and pred_arg:

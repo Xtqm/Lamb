@@ -32,6 +32,7 @@ class UIElement:
     is_scrollable: bool = False
     is_focused: bool = False
     attributes: Dict[str, str] = field(default_factory=dict)
+    has_bbox: bool = True  # False when the source observation did not provide geometry
 
     @property
     def center(self) -> Tuple[float, float]:
@@ -72,9 +73,10 @@ class UIElement:
             attrs += f" value='{self.value}'"
         if self.is_focused:
             attrs += " focused='true'"
+        bbox_text = f"[{cx:.2f},{cy:.2f}]" if self.has_bbox else "unavailable"
         return (
             f"<{self.tag} id={self.element_id} role='{self.role}' "
-            f"bbox='[{cx:.2f},{cy:.2f}]'{attrs}>{clean_text}</{self.tag}>"
+            f"bbox='{bbox_text}'{attrs}>{clean_text}</{self.tag}>"
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -91,6 +93,7 @@ class UIElement:
             "is_scrollable": self.is_scrollable,
             "is_focused": self.is_focused,
             "center": self.center,
+            "has_bbox": self.has_bbox,
         }
 
 
@@ -119,6 +122,12 @@ class InteractionTurn:
     target_element_id: Optional[int] = None
     is_perturbed: bool = False  # RL preference perturbation marker
     interactive_elements: Optional[List[UIElement]] = None
+    rationale_mask: bool = True  # Whether thought text is recorded supervision
+    action_type_mask: bool = True  # Whether the source operation maps unambiguously to a class
+    coordinate_mask: bool = True  # Whether the source provides valid spatial supervision
+    target_element_mask: bool = True  # Whether a target element is uniquely identified
+    argument_mask: bool = True  # Whether the source provides an argument target
+    source_operation: Optional[str] = None  # Original source operation before class mapping
 
     def __post_init__(self):
         if self.interactive_elements is not None and not self.dom_elements:

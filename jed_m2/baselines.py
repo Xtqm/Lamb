@@ -228,6 +228,39 @@ def get_baseline_config(baseline_name: str) -> JEDM2Config:
         raise ValueError(f"Unknown baseline name: {baseline_name}. Choose from: baseline_a, baseline_b, baseline_c, baseline_d.")
 
 
+def get_ablation_config(baseline_name: str, **overrides: Any) -> JEDM2Config:
+    """Return a fresh ablation config with SELECT appended as class index 6.
+
+    Legacy checkpoint configs continue to use ``get_baseline_config`` or the
+    default six-class ``JEDM2Config``. Optional keyword overrides are used by
+    the parameter calibration step to tune intermediate widths.
+    """
+    config = get_baseline_config(baseline_name)
+    config.num_action_types = 7
+    name = baseline_name.lower()
+    calibrated_widths = {
+        "baseline_a": {"dense_intermediate_dim": 6876},
+        "transformer": {"dense_intermediate_dim": 6876},
+        "pure_transformer": {"dense_intermediate_dim": 6876},
+        "baseline_b": {"dense_intermediate_dim": 8516},
+        "hybrid": {"dense_intermediate_dim": 8516},
+        "hybrid_ssm_attn": {"dense_intermediate_dim": 8516},
+        "baseline_c": {"moe_intermediate_dim": 1064},
+        "jed_m2_no_jepa": {"moe_intermediate_dim": 1064},
+        "no_jepa": {"moe_intermediate_dim": 1064},
+        "baseline_d": {},
+        "full_jed_m2": {},
+        "jed_m2": {},
+    }
+    for field_name, value in calibrated_widths.get(name, {}).items():
+        setattr(config, field_name, value)
+    for name, value in overrides.items():
+        if not hasattr(config, name):
+            raise ValueError(f"Unknown JED-M2 ablation config field: {name}")
+        setattr(config, name, value)
+    return config
+
+
 def create_baseline_a() -> Any:
     """Instantiate Baseline A (Pure Transformer: Standard MHA + Dense SwiGLU FFN, 4 layers, ~50.5M params)."""
     from jed_m2.model import JEDM2Model

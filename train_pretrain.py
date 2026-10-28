@@ -15,6 +15,10 @@ import os
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+# Enable dynamic virtual memory segments to prevent CUDA memory fragmentation and spills on Windows WDDM
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -54,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     # Batch and Sequence Length
     parser.add_argument("--batch_size", type=int, default=16, help="Target effective batch size (accumulated)")
     parser.add_argument("--micro_batch_size", type=int, default=2, help="Micro-batch size per forward pass")
-    parser.add_argument("--seq_len", type=int, default=2048, help="Maximum sequence length")
+    parser.add_argument("--seq_len", type=int, default=1024, help="Maximum sequence length (calibrated for <6GB VRAM)")
 
     # Dataset & Cache
     parser.add_argument("--dataset_size", type=int, default=5000, help="Number of real trajectory samples in train split")
@@ -351,6 +355,8 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
                 },
             )
             print(f"Checkpoint saved to: {saved_path}\n")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # Final Evaluation & Convergence Check
     print("\n" + "=" * 80)

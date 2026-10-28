@@ -43,6 +43,8 @@ def compute_obs_features(
 
     # Spatial pointer coordinates projection
     for el in elements:
+        if not getattr(el, "has_bbox", True):
+            continue
         center = getattr(el, "center", None)
         if center is not None:
             cx_dim = int(center[0] * (hidden_dim - 1))

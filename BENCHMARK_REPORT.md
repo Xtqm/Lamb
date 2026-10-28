@@ -1,6 +1,6 @@
 # JED-M2 Large Action Model - Benchmark Evaluation Report
 
-**Generated:** 2026-10-25 02:16:54 UTC  
+**Generated:** 2026-10-26 04:14:24 UTC  
 **Benchmark Domain:** `real_web_val`  
 **Evaluation Device:** `cuda`  
 
@@ -13,8 +13,8 @@ Evaluated on 15 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on
 
 | Checkpoint | Episodes | Task SR (%) | Step SR | Macro F1 | Micro F1 | Coord MAE | Coord Tol Acc (eps<=0.05) | Efficiency Ratio | Latency (ms/step) | Throughput (tok/s) | Peak VRAM (MB) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **jed_m2_nano_step_15800** | 15 | 0.00% | 0.8303 | 0.8192 | 0.8440 | 0.3203 | 0.1864 | 0.0000 | 4112.34 ms | 90.3 | 145.4 MB |
-| **jed_m2_nano_grpo_final** | 15 | 0.00% | 0.8303 | 0.8192 | 0.8440 | 0.3335 | 0.1743 | 0.0000 | 4234.44 ms | 87.9 | 145.4 MB |
+| **jed_m2_nano_step_15800** | 15 | 0.00% | 0.8303 | 0.8192 | 0.8440 | 0.3203 | 0.1864 | 0.0000 | 4262.26 ms | 86.8 | 145.4 MB |
+| **jed_m2_nano_step_18000** | 15 | 0.00% | 0.8407 | 0.8532 | 0.8532 | 0.3075 | 0.1642 | 0.0000 | 4205.53 ms | 87.9 | 145.4 MB |
 
 ---
 
@@ -23,7 +23,7 @@ Evaluated on 15 episodes with max_steps=15 and spatial tolerance epsilon=0.05 on
 | Checkpoint | CLICK | TYPE | SCROLL | NAVIGATE | API_CALL | FINISH |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **jed_m2_nano_step_15800** | 0.915 | 0.000 | 1.000 | 1.000 | 1.000 | 1.000 |
-| **jed_m2_nano_grpo_final** | 0.915 | 0.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| **jed_m2_nano_step_18000** | 0.919 | 0.200 | 1.000 | 1.000 | 1.000 | 1.000 |
 
 ---
 

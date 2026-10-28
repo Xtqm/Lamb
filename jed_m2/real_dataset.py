@@ -129,12 +129,14 @@ class FastDOMParser(HTMLParser):
         viewport_w: float = 1280.0,
         viewport_h: float = 720.0,
         bbox_map: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
+        allow_fallback_bbox: bool = True,
     ):
         super().__init__()
         self.max_elements = max_elements
         self.viewport_w = viewport_w
         self.viewport_h = viewport_h
         self.bbox_map = bbox_map or {}
+        self.allow_fallback_bbox = allow_fallback_bbox
 
         self.elements: List[InteractiveElement] = []
         self._current_element: Optional[Dict[str, Any]] = None
@@ -177,9 +179,20 @@ class FastDOMParser(HTMLParser):
                     or attr_dict.get("data-bbox")
                     or attr_dict.get("coords")
                     or self.bbox_map.get(attr_dict.get("id", ""))
-                    or self._generate_fallback_bbox(self._element_counter)
+                    or self.bbox_map.get(
+                        attr_dict.get("backend_node_id")
+                        or attr_dict.get("data-backend-node-id")
+                        or attr_dict.get("data-bid", "")
+                    )
                 )
-                norm_box = normalize_bbox(raw_bbox, self.viewport_w, self.viewport_h)
+                has_source_bbox = raw_bbox is not None
+                if raw_bbox is None and self.allow_fallback_bbox:
+                    raw_bbox = self._generate_fallback_bbox(self._element_counter)
+                    has_source_bbox = True
+                norm_box = (
+                    normalize_bbox(raw_bbox, self.viewport_w, self.viewport_h)
+                    if raw_bbox is not None else (0.0, 0.0, 0.0, 0.0)
+                )
 
                 self._current_element = {
                     "element_id": self._element_counter,
@@ -187,6 +200,7 @@ class FastDOMParser(HTMLParser):
                     "role": assigned_role,
                     "text": initial_text,
                     "bbox": norm_box,
+                    "has_bbox": has_source_bbox,
                     "attributes": attr_dict,
                 }
 
@@ -211,6 +225,7 @@ class FastDOMParser(HTMLParser):
                 text=text,
                 bbox=self._current_element["bbox"],
                 attributes=self._current_element["attributes"],
+                has_bbox=self._current_element["has_bbox"],
             )
             self.elements.append(elem)
             self._current_element = None
@@ -263,6 +278,7 @@ class FastDOMParser(HTMLParser):
         viewport_w: float = 1280.0,
         viewport_h: float = 720.0,
         bbox_map: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
+        allow_fallback_bbox: bool = True,
     ) -> Tuple[List[InteractiveElement], int]:
         """
         Parses raw HTML and returns a filtered list of interactive candidate elements
@@ -273,6 +289,7 @@ class FastDOMParser(HTMLParser):
             viewport_w=viewport_w,
             viewport_h=viewport_h,
             bbox_map=bbox_map,
+            allow_fallback_bbox=allow_fallback_bbox,
         )
         try:
             parser.feed(html_str)
@@ -297,6 +314,7 @@ class RealWebTrajectorySample:
     turns: List[RealWebInteractionTurn]
     split: str = "train"  # "train", "val", or "test"
     total_reward: float = 1.0
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def length(self) -> int:
@@ -525,6 +543,8 @@ class RealWebTrajectoryDataset(Dataset):
         raw_mind2web_dir: Optional[str] = "data/raw_mind2web",
         force_rebuild: bool = False,
         seed: int = 42,
+        real_only: bool = False,
+        manifest_path: Optional[str] = None,
     ):
         super().__init__()
         self.config = config
@@ -534,12 +554,56 @@ class RealWebTrajectoryDataset(Dataset):
         self.raw_mind2web_dir = Path(raw_mind2web_dir) if raw_mind2web_dir is not None else None
         self.seed = seed
         self.hidden_dim = config.hidden_dim
+        self.real_only = real_only
+        self.manifest_path = Path(manifest_path) if manifest_path else None
+        self.real_manifest: Optional[Dict[str, Any]] = None
+        self.real_data_audit: Dict[str, Any] = {}
+        if self.real_only:
+            if self.raw_mind2web_dir is None:
+                raise ValueError("real_only=True requires raw_mind2web_dir.")
+            if self.manifest_path is None:
+                raise ValueError("real_only=True requires a prepared site-held-out manifest_path.")
+            self.real_manifest = self._load_real_manifest(self.manifest_path)
+            split_ids = self.real_manifest.get("splits", {}).get(self.split)
+            if not isinstance(split_ids, list) or not split_ids:
+                raise ValueError(f"The real-data manifest has no task IDs for split={self.split!r}.")
+            self.dataset_size = len(split_ids)
 
         self.samples: List[RealWebTrajectorySample] = []
         self._init_dataset(force_rebuild=force_rebuild)
 
+    @staticmethod
+    def _load_real_manifest(path: Path) -> Dict[str, Any]:
+        """Loads and validates a prepared real-only manifest without accepting fixtures."""
+        if not path.is_file():
+            raise FileNotFoundError(f"Real-only manifest not found: {path}")
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        recorded_hash = manifest.get("manifest_sha256")
+        unhashed = dict(manifest)
+        unhashed.pop("manifest_sha256", None)
+        calculated_hash = hashlib.sha256(
+            json.dumps(unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()
+        if manifest.get("schema") != "jed-m2.real-web-manifest.v1" or recorded_hash != calculated_hash:
+            raise ValueError(f"Real-only manifest schema or checksum is invalid: {path}")
+        if manifest.get("status") != "ready":
+            raise ValueError(f"Real-only manifest is not ready for training: {path}")
+        source = manifest.get("source", {})
+        if source.get("dataset") != "osunlp/Mind2Web" or source.get("upstream_split") != "train":
+            raise ValueError("Real-only mode accepts only the declared Mind2Web training corpus.")
+        if str(source.get("verification", "")).startswith("synthetic"):
+            raise ValueError("Synthetic fixture manifests are not accepted in real-only mode.")
+        if not isinstance(manifest.get("tasks"), list) or not isinstance(manifest.get("splits"), dict):
+            raise ValueError("Real-only manifest is missing its task index or split assignments.")
+        return manifest
+
     def _get_cache_path(self) -> Path:
         os.makedirs(self.cache_dir, exist_ok=True)
+        if self.real_only and self.real_manifest is not None:
+            manifest_hash = self.real_manifest["manifest_sha256"]
+            return self.cache_dir / (
+                f"real_web_real_v4_{manifest_hash[:16]}_{self.split}_h{self.hidden_dim}.pt"
+            )
         has_m2w = False
         if self.raw_mind2web_dir and self.raw_mind2web_dir.exists():
             if list(self.raw_mind2web_dir.glob("*.json")):
@@ -552,26 +616,41 @@ class RealWebTrajectoryDataset(Dataset):
 
     def _init_dataset(self, force_rebuild: bool = False):
         cache_path = self._get_cache_path()
+        expected_ids = None
+        if self.real_only and self.real_manifest is not None:
+            expected_ids = self.real_manifest["splits"][self.split]
         if cache_path.exists() and not force_rebuild:
             try:
                 cached_data = torch.load(cache_path, map_location="cpu", weights_only=False)
-                if isinstance(cached_data, list) and len(cached_data) == self.dataset_size:
+                cache_matches = isinstance(cached_data, list) and len(cached_data) == self.dataset_size
+                if cache_matches and expected_ids is not None:
+                    cache_matches = [sample.sample_id for sample in cached_data] == expected_ids
+                if cache_matches:
                     self.samples = cached_data
+                    if self.real_only:
+                        self.real_data_audit = self._summarize_real_dataset()
                     return
             except Exception:
                 pass
 
-        # Build dataset from real Mind2Web corpus or fallback templates
+        # Strict mode follows the prepared manifest and never scans fixture folders.
         self.samples = self._generate_split_samples()
+        if expected_ids is not None and [sample.sample_id for sample in self.samples] != expected_ids:
+            raise ValueError("Real-only dataset did not produce each manifest task exactly once in manifest order.")
+        if self.real_only:
+            self.real_data_audit = self._summarize_real_dataset()
 
         # Save to persistent disk cache
         try:
             torch.save(self.samples, cache_path)
         except Exception:
-            pass
+            if self.real_only:
+                raise
 
     def _generate_split_samples(self) -> List[RealWebTrajectorySample]:
         """Generates stratified trajectory samples from real Mind2Web or offline templates."""
+        if self.real_only:
+            return self._generate_from_real_manifest()
         if self.raw_mind2web_dir and self.raw_mind2web_dir.exists():
             # 1. Check for genuine Mind2Web task chunk JSON files (e.g., train_0.json)
             chunk_files = sorted(list(self.raw_mind2web_dir.glob("*.json")))
@@ -597,6 +676,68 @@ class RealWebTrajectoryDataset(Dataset):
             self.raw_mind2web_dir, self.split
         )
         return self._generate_from_templates()
+
+    def _generate_from_real_manifest(self) -> List[RealWebTrajectorySample]:
+        """Loads only the exact source records assigned to this split in the manifest."""
+        if self.real_manifest is None or self.raw_mind2web_dir is None:
+            raise RuntimeError("Real-only manifest or source directory is unavailable.")
+        manifest_tasks = [
+            record for record in self.real_manifest["tasks"]
+            if record.get("split") == self.split
+        ]
+        expected_ids = self.real_manifest["splits"][self.split]
+        if [record.get("annotation_id") for record in manifest_tasks] != expected_ids:
+            raise ValueError(f"Manifest task index does not match split assignment for {self.split}.")
+
+        allowed_paths = {record["path"] for record in self.real_manifest["source"]["files"]}
+        by_file: Dict[str, List[Dict[str, Any]]] = {}
+        for record in manifest_tasks:
+            source_file = str(record.get("source_file", ""))
+            if source_file not in allowed_paths:
+                raise ValueError(f"Manifest task refers to an unverified source file: {source_file}")
+            by_file.setdefault(source_file, []).append(record)
+
+        selected_tasks: List[Dict[str, Any]] = []
+        source_file_records = {
+            record["path"]: record for record in self.real_manifest["source"]["files"]
+        }
+        source_info = self.real_manifest["source"]
+        root = self.raw_mind2web_dir.resolve()
+        for source_file, entries in by_file.items():
+            relative = Path(source_file)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"Unsafe source path in real-only manifest: {source_file}")
+            path = (self.raw_mind2web_dir / relative).resolve()
+            if not path.is_relative_to(root):
+                raise ValueError(f"Source path escapes the Mind2Web directory: {source_file}")
+            if not path.is_file():
+                raise FileNotFoundError(f"Manifest source file is missing: {path}")
+            with path.open("r", encoding="utf-8") as handle:
+                rows = json.load(handle)
+            if not isinstance(rows, list):
+                rows = [rows]
+            for record in sorted(entries, key=lambda item: item["record_index"]):
+                index = int(record["record_index"])
+                if index < 0 or index >= len(rows):
+                    raise ValueError(f"Manifest record index is out of range for {source_file}: {index}")
+                task = rows[index]
+                if task.get("annotation_id") != record["annotation_id"]:
+                    raise ValueError(f"Manifest task ID no longer matches {source_file} record {index}.")
+                task["_real_manifest_record"] = {
+                    **record,
+                    "source_file_sha256": source_file_records[source_file]["sha256"],
+                    "source_revision": source_info.get("revision"),
+                    "source_verification": source_info.get("verification"),
+                    "source_manifest_sha256": source_info.get("source_manifest_sha256"),
+                }
+                selected_tasks.append(task)
+            del rows
+
+        selected_tasks_by_id = {str(task["annotation_id"]): task for task in selected_tasks}
+        if len(selected_tasks_by_id) != len(expected_ids):
+            raise ValueError("Real-only manifest contains missing or duplicate task IDs for this split.")
+        ordered_tasks = [selected_tasks_by_id[task_id] for task_id in expected_ids]
+        return self._parse_mind2web_task_list(ordered_tasks)
 
     def _generate_from_mind2web_chunks(
         self, chunk_files: List[Path]
@@ -631,24 +772,24 @@ class RealWebTrajectoryDataset(Dataset):
     def _parse_mind2web_task_list(
         self, tasks: List[Dict[str, Any]]
     ) -> List[RealWebTrajectorySample]:
-        """Parses a list of genuine Mind2Web task dictionaries into RealWebTrajectorySample objects."""
+        """Parses unique Mind2Web task dictionaries into pre-computed templates, then generates stratified samples with TYPE rebalancing and spatial augmentation."""
+        if self.real_only:
+            return self._parse_real_mind2web_task_list(tasks)
         samples: List[RealWebTrajectorySample] = []
-        num_tasks = len(tasks)
+        if not tasks:
+            return samples
 
-        for i in range(self.dataset_size):
-            task_idx = (self.seed + i) % num_tasks
-            task_data = tasks[task_idx]
-
-            ann_id = task_data.get("annotation_id", f"task_{i:04d}")
-            sample_id = f"m2w_{self.split}_{i:05d}_{ann_id}"
+        logger.info("Pre-parsing %d unique Mind2Web tasks for split=%s...", len(tasks), self.split)
+        parsed_base_tasks = []
+        for t_idx, task_data in enumerate(tasks):
+            ann_id = task_data.get("annotation_id", f"task_{t_idx:04d}")
             domain = task_data.get("domain", task_data.get("website", "web"))
             website = task_data.get("website", "web")
             goal = task_data.get("confirmed_task", "Complete web interaction")
-            turns: List[RealWebInteractionTurn] = []
-
             actions = task_data.get("actions", [])
+            base_turns = []
+
             for turn_idx, act_info in enumerate(actions):
-                # Retrieve HTML code from cleaned_html or raw_html
                 html_code = act_info.get("cleaned_html") or act_info.get("raw_html") or ""
                 if not html_code:
                     html_code = "<html><body><button id='action-btn' bbox='[100,100,200,150]'>Action</button></body></html>"
@@ -657,10 +798,8 @@ class RealWebTrajectoryDataset(Dataset):
                 obs_dom_strs = [el.to_dom_string() for el in elements]
                 url_str = act_info.get("url", f"https://www.{website}.com")
                 obs_text = f"URL: {url_str} | DOM: " + " ".join(obs_dom_strs)
-
                 obs_features = self.compute_obs_features(obs_text, elements, self.hidden_dim)
 
-                # Target coordinates and bounding box from pos_candidates
                 raw_bbox = None
                 pos_cands = act_info.get("pos_candidates", [])
                 if pos_cands and isinstance(pos_cands, list):
@@ -682,10 +821,9 @@ class RealWebTrajectoryDataset(Dataset):
                     raw_bbox = (100.0, 100.0, 200.0, 50.0)
 
                 norm_box = normalize_bbox(raw_bbox)
-                cx = (norm_box[0] + norm_box[2]) / 2.0
-                cy = (norm_box[1] + norm_box[3]) / 2.0
+                base_cx = (norm_box[0] + norm_box[2]) / 2.0
+                base_cy = (norm_box[1] + norm_box[3]) / 2.0
 
-                # Action type mapping
                 op_dict = act_info.get("operation", {})
                 op_str = (
                     op_dict.get("op") or op_dict.get("original_op") or "CLICK"
@@ -704,29 +842,262 @@ class RealWebTrajectoryDataset(Dataset):
                 else:
                     action_type = ActionType.CLICK
 
-                # Argument
                 arg_val = op_dict.get("value", "") if isinstance(op_dict, dict) else ""
                 argument = str(arg_val) if arg_val is not None else ""
 
-                # Target element matching
                 target_id = None
                 min_dist = float("inf")
                 for el in elements:
-                    x1, y1, x2, y2 = el.bbox
-                    if x1 <= cx <= x2 and y1 <= cy <= y2:
+                    if el.bbox[0] <= base_cx <= el.bbox[2] and el.bbox[1] <= base_cy <= el.bbox[3]:
                         target_id = el.element_id
                         break
-                    el_cx, el_cy = el.center
-                    dist = (el_cx - cx) ** 2 + (el_cy - cy) ** 2
+                    dist = (el.center[0] - base_cx) ** 2 + (el.center[1] - base_cy) ** 2
                     if dist < min_dist:
                         min_dist = dist
                         target_id = el.element_id
 
-                thought = act_info.get("thought", f"Execute {action_type.name} at coordinates ({cx:.2f}, {cy:.2f})")
+                thought = act_info.get("thought", f"Execute {action_type.name} at coordinates ({base_cx:.2f}, {base_cy:.2f})")
 
-                turn = RealWebInteractionTurn(
+                base_turns.append({
+                    "turn_id": turn_idx,
+                    "url": url_str,
+                    "elements": elements,
+                    "obs_text": obs_text,
+                    "obs_features": obs_features,
+                    "thought": thought,
+                    "action_type": action_type,
+                    "base_cx": base_cx,
+                    "base_cy": base_cy,
+                    "argument": argument,
+                    "target_id": target_id,
+                    "is_last": (turn_idx == len(actions) - 1),
+                })
+
+            parsed_base_tasks.append({
+                "ann_id": ann_id,
+                "domain": domain,
+                "website": website,
+                "goal": goal,
+                "turns": base_turns,
+                "has_type": any(bt["action_type"] == ActionType.TYPE for bt in base_turns),
+            })
+
+        logger.info("Successfully parsed %d base tasks.", len(parsed_base_tasks))
+        type_base_tasks = [t for t in parsed_base_tasks if t["has_type"]]
+
+        if self.real_only:
+            # The manifest is the epoch boundary: each unique real annotation appears once.
+            # Keep the exact source ID and do not pad, rebalance, or perturb source labels.
+            sample_specs = [(base_t["ann_id"], base_t) for base_t in parsed_base_tasks]
+        else:
+            # Preserve the legacy fixture/augmentation behavior for existing checkpoints.
+            sample_specs = []
+            for i in range(self.dataset_size):
+                if self.split == "train" and type_base_tasks and (i % 5 < 2):
+                    base_t = type_base_tasks[(self.seed + i) % len(type_base_tasks)]
+                else:
+                    base_t = parsed_base_tasks[(self.seed + i) % len(parsed_base_tasks)]
+                sample_specs.append((f"m2w_{self.split}_{i:05d}_{base_t['ann_id']}", base_t))
+
+        for sample_id, base_t in sample_specs:
+            sample_turns: List[RealWebInteractionTurn] = []
+
+            for bt in base_t["turns"]:
+                turn_idx = bt["turn_id"]
+                cx = bt["base_cx"]
+                cy = bt["base_cy"]
+
+                if self.split == "train" and not self.real_only:
+                    h = int(hashlib.md5(f"{sample_id}_{turn_idx}".encode("utf-8")).hexdigest()[:8], 16) % 10000
+                    jitter_x = ((h % 100) / 100.0 - 0.5) * 0.04
+                    jitter_y = (((h // 100) % 100) / 100.0 - 0.5) * 0.04
+                    cx = max(0.01, min(0.99, round(cx + jitter_x, 4)))
+                    cy = max(0.01, min(0.99, round(cy + jitter_y, 4)))
+
+                sample_turn = RealWebInteractionTurn(
                     turn_id=turn_idx,
-                    url=url_str,
+                    url=bt["url"],
+                    interactive_elements=bt["elements"],
+                    obs_text=bt["obs_text"],
+                    obs_features=bt["obs_features"],
+                    thought=bt["thought"],
+                    action_type=bt["action_type"],
+                    coordinates=(cx, cy),
+                    argument=bt["argument"],
+                    target_element_id=bt["target_id"],
+                    reward=1.0 if bt["is_last"] else 0.0,
+                )
+                sample_turns.append(sample_turn)
+
+            sample = RealWebTrajectorySample(
+                sample_id=sample_id,
+                domain=base_t["domain"],
+                goal=base_t["goal"],
+                turns=sample_turns,
+                split=self.split,
+                total_reward=1.0,
+            )
+            samples.append(sample)
+
+        return samples
+
+    @staticmethod
+    def _candidate_attributes(candidate: Dict[str, Any]) -> Dict[str, Any]:
+        attrs = candidate.get("attributes", {})
+        if isinstance(attrs, str):
+            try:
+                attrs = json.loads(attrs)
+            except (TypeError, json.JSONDecodeError):
+                return {}
+        return attrs if isinstance(attrs, dict) else {}
+
+    @classmethod
+    def _source_candidate_bbox(cls, candidate: Dict[str, Any]) -> Optional[List[float]]:
+        attrs = cls._candidate_attributes(candidate)
+        bbox = attrs.get("bounding_box_rect")
+        if isinstance(bbox, dict):
+            bbox = [bbox.get("x"), bbox.get("y"), bbox.get("width"), bbox.get("height")]
+        elif isinstance(bbox, str):
+            bbox = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", bbox)[:4]
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return None
+        try:
+            values = [float(value) for value in bbox]
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in values) or values[2] <= 0 or values[3] <= 0:
+            return None
+        return values
+
+    @classmethod
+    def _candidate_matches_element(
+        cls, candidate: Dict[str, Any], element: InteractiveElement
+    ) -> bool:
+        attrs = cls._candidate_attributes(candidate)
+        candidate_tag = str(candidate.get("tag", "")).strip().casefold()
+        if candidate_tag and candidate_tag != element.tag.casefold():
+            return False
+        element_attrs = {str(key).casefold(): str(value) for key, value in element.attributes.items()}
+        candidate_backend_id = candidate.get("backend_node_id") or attrs.get("backend_node_id")
+        element_backend_id = (
+            element_attrs.get("backend_node_id")
+            or element_attrs.get("data-backend-node-id")
+            or element_attrs.get("data-bid")
+        )
+        if candidate_backend_id is not None and element_backend_id is not None:
+            return str(candidate_backend_id) == element_backend_id
+        identity_keys = (
+            "id", "name", "aria-label", "placeholder", "title", "data-testid",
+            "type", "href", "value",
+        )
+        return any(
+            key in attrs
+            and attrs[key] not in (None, "")
+            and key in element_attrs
+            and str(attrs[key]) == element_attrs[key]
+            for key in identity_keys
+        )
+
+    def _parse_real_mind2web_task_list(
+        self, tasks: List[Dict[str, Any]]
+    ) -> List[RealWebTrajectorySample]:
+        """Converts source annotations without generating missing observations or labels."""
+        samples: List[RealWebTrajectorySample] = []
+        for task_data in tasks:
+            annotation_id = str(task_data.get("annotation_id", ""))
+            manifest_record = task_data.get("_real_manifest_record", {})
+            turns: List[RealWebInteractionTurn] = []
+            for turn_idx, action in enumerate(task_data.get("actions", [])):
+                if not isinstance(action, dict):
+                    continue
+                html_code = action.get("cleaned_html") or action.get("raw_html") or ""
+                if not html_code:
+                    continue
+
+                candidates = action.get("pos_candidates") or []
+                if not isinstance(candidates, list):
+                    candidates = []
+                original_candidates = [
+                    candidate for candidate in candidates
+                    if isinstance(candidate, dict)
+                    and str(candidate.get("is_original_target", "")).casefold() == "true"
+                ]
+                original_candidate = original_candidates[0] if len(original_candidates) == 1 else None
+
+                bbox_map: Dict[str, Tuple[float, float, float, float]] = {}
+                candidate_ids: Dict[str, List[List[float]]] = {}
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    candidate_attrs = self._candidate_attributes(candidate)
+                    candidate_bbox = self._source_candidate_bbox(candidate)
+                    backend_id = candidate.get("backend_node_id") or candidate_attrs.get("backend_node_id")
+                    for identifier in (candidate_attrs.get("id"), backend_id):
+                        if candidate_bbox is not None and identifier not in (None, ""):
+                            candidate_ids.setdefault(str(identifier), []).append(candidate_bbox)
+                for element_identity, boxes in candidate_ids.items():
+                    if len(boxes) == 1:
+                        bbox_map[element_identity] = tuple(boxes[0])
+
+                elements, _ = FastDOMParser.parse_html(
+                    html_code,
+                    max_elements=64,
+                    bbox_map=bbox_map,
+                    allow_fallback_bbox=False,
+                )
+                matched_target_ids: List[int] = []
+                if original_candidate is not None:
+                    matched_target_ids = [
+                        element.element_id for element in elements
+                        if self._candidate_matches_element(original_candidate, element)
+                    ]
+                target_id = matched_target_ids[0] if len(matched_target_ids) == 1 else None
+
+                target_bbox = (
+                    self._source_candidate_bbox(original_candidate)
+                    if original_candidate is not None else None
+                )
+                coordinate_mask = target_bbox is not None
+                if coordinate_mask:
+                    target_box = normalize_bbox(target_bbox)
+                    cx = (target_box[0] + target_box[2]) / 2.0
+                    cy = (target_box[1] + target_box[3]) / 2.0
+                else:
+                    cx, cy = 0.0, 0.0
+
+                operation = action.get("operation") or {}
+                op_value = operation.get("op", "") if isinstance(operation, dict) else operation
+                source_operation = str(op_value or "").strip().upper()
+                action_type_map = {
+                    "CLICK": ActionType.CLICK,
+                    "TYPE": ActionType.TYPE,
+                    "SELECT": ActionType.SELECT,
+                    "SCROLL": ActionType.SCROLL,
+                    "NAVIGATE": ActionType.NAVIGATE,
+                    "API_CALL": ActionType.API_CALL,
+                    "FINISH": ActionType.FINISH,
+                }
+                if source_operation not in action_type_map:
+                    continue
+                action_type = action_type_map[source_operation]
+                if action_type not in (ActionType.CLICK, ActionType.SELECT):
+                    coordinate_mask = False
+                    cx, cy = 0.0, 0.0
+
+                raw_argument = operation.get("value") if isinstance(operation, dict) else None
+                argument_mask = isinstance(operation, dict) and "value" in operation and raw_argument is not None
+                argument = str(raw_argument) if argument_mask else ""
+                thought_value = action.get("thought")
+                rationale_mask = isinstance(thought_value, str) and bool(thought_value.strip())
+                thought = thought_value.strip() if rationale_mask else ""
+                url = str(action.get("url") or "")
+                dom_summary = " ".join(element.to_dom_string() for element in elements)
+                obs_text = f"URL: {url} | DOM: {dom_summary}"
+                obs_features = self.compute_obs_features(obs_text, elements, self.hidden_dim)
+
+                turns.append(RealWebInteractionTurn(
+                    turn_id=turn_idx,
+                    url=url,
                     interactive_elements=elements,
                     obs_text=obs_text,
                     obs_features=obs_features,
@@ -735,21 +1106,92 @@ class RealWebTrajectoryDataset(Dataset):
                     coordinates=(cx, cy),
                     argument=argument,
                     target_element_id=target_id,
-                    reward=1.0 if turn_idx == len(actions) - 1 else 0.0,
-                )
-                turns.append(turn)
+                    reward=1.0 if turn_idx == len(task_data.get("actions", [])) - 1 else 0.0,
+                    rationale_mask=rationale_mask,
+                    action_type_mask=True,
+                    coordinate_mask=coordinate_mask,
+                    target_element_mask=target_id is not None,
+                    argument_mask=argument_mask,
+                    source_operation=source_operation,
+                ))
 
-            sample = RealWebTrajectorySample(
-                sample_id=sample_id,
-                domain=domain,
-                goal=goal,
+            if not turns:
+                continue
+            source = self.real_manifest.get("source", {}) if self.real_manifest else {}
+            snapshot_hashes = manifest_record.get("snapshot_hashes", [])
+            content_sha = hashlib.sha256(
+                json.dumps(snapshot_hashes, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            samples.append(RealWebTrajectorySample(
+                sample_id=annotation_id,
+                domain=str(task_data.get("domain") or ""),
+                goal=str(task_data.get("confirmed_task") or ""),
                 turns=turns,
                 split=self.split,
                 total_reward=1.0,
-            )
-            samples.append(sample)
-
+                provenance={
+                    "dataset": source.get("dataset"),
+                    "revision": source.get("revision"),
+                    "upstream_split": manifest_record.get("upstream_split"),
+                    "source_file": manifest_record.get("source_file"),
+                    "source_file_sha256": manifest_record.get("source_file_sha256"),
+                    "source_manifest_sha256": manifest_record.get("source_manifest_sha256"),
+                    "annotation_id": annotation_id,
+                    "website": manifest_record.get("website"),
+                    "site_key": manifest_record.get("site_key"),
+                    "content_sha256": content_sha,
+                },
+            ))
         return samples
+
+    def _summarize_real_dataset(self) -> Dict[str, Any]:
+        """Summarizes supervised-label coverage and exclusions for the selected manifest split."""
+        tasks_by_id = {
+            record["annotation_id"]: record
+            for record in self.real_manifest.get("tasks", [])
+            if record.get("split") == self.split
+        } if self.real_manifest else {}
+        turns = [turn for sample in self.samples for turn in sample.turns]
+        manifest_action_count = sum(
+            int(tasks_by_id.get(sample.sample_id, {}).get("action_count", len(sample.turns)))
+            for sample in self.samples
+        )
+        raw_observation_action_count = sum(
+            int(tasks_by_id.get(sample.sample_id, {}).get("usable_action_count", len(sample.turns)))
+            for sample in self.samples
+        )
+        operation_counts: Dict[str, int] = {}
+        source_operation_counts: Dict[str, int] = {}
+        for record in tasks_by_id.values():
+            for op, count in record.get("operation_counts", {}).items():
+                source_operation_counts[op] = source_operation_counts.get(op, 0) + int(count)
+        for turn in turns:
+            op = turn.source_operation or turn.action_type.name
+            operation_counts[op] = operation_counts.get(op, 0) + 1
+        return {
+            "split": self.split,
+            "manifest_sha256": self.real_manifest.get("manifest_sha256") if self.real_manifest else None,
+            "tasks": len(self.samples),
+            "websites": len({sample.provenance.get("site_key") for sample in self.samples}),
+            "source_actions": manifest_action_count,
+            "usable_observation_actions": raw_observation_action_count,
+            "included_actions": len(turns),
+            "excluded_actions": max(0, manifest_action_count - len(turns)),
+            "missing_observation_exclusions": max(0, manifest_action_count - raw_observation_action_count),
+            "action_type_supervision": sum(bool(turn.action_type_mask) for turn in turns),
+            "rationale_supervision": sum(bool(turn.rationale_mask) for turn in turns),
+            "coordinate_supervision": sum(bool(turn.coordinate_mask) for turn in turns),
+            "spatial_actions": sum(turn.action_type in (ActionType.CLICK, ActionType.SELECT) for turn in turns),
+            "target_element_supervision": sum(bool(turn.target_element_mask) for turn in turns),
+            "missing_rationale": sum(not turn.rationale_mask for turn in turns),
+            "missing_or_ambiguous_target": sum(not turn.target_element_mask for turn in turns),
+            "missing_target_geometry": sum(
+                turn.action_type in (ActionType.CLICK, ActionType.SELECT) and not turn.coordinate_mask
+                for turn in turns
+            ),
+            "source_operations": dict(sorted(source_operation_counts.items())),
+            "operations": dict(sorted(operation_counts.items())),
+        }
 
     def _generate_from_mind2web(
         self, raw_split_dir: Path, task_files: List[Path]
@@ -805,6 +1247,14 @@ class RealWebTrajectoryDataset(Dataset):
                 norm_box = normalize_bbox(raw_bbox)
                 cx = (norm_box[0] + norm_box[2]) / 2.0
                 cy = (norm_box[1] + norm_box[3]) / 2.0
+
+                if self.split == "train":
+                    # Calibrated spatial jitter (+/- 2%) to break coordinate memorization
+                    h = int(hashlib.md5(f"{sample_id}_{turn_idx}".encode("utf-8")).hexdigest()[:8], 16) % 10000
+                    jitter_x = ((h % 100) / 100.0 - 0.5) * 0.04
+                    jitter_y = (((h // 100) % 100) / 100.0 - 0.5) * 0.04
+                    cx = max(0.01, min(0.99, round(cx + jitter_x, 4)))
+                    cy = max(0.01, min(0.99, round(cy + jitter_y, 4)))
 
                 # Action type mapping
                 op_dict = act_info.get("operation", {})
@@ -906,6 +1356,14 @@ class RealWebTrajectoryDataset(Dataset):
                 cx = (norm_box[0] + norm_box[2]) / 2.0
                 cy = (norm_box[1] + norm_box[3]) / 2.0
 
+                if self.split == "train":
+                    # Calibrated spatial jitter (+/- 2%) to break coordinate memorization
+                    h = int(hashlib.md5(f"{sample_id}_{turn_idx}".encode("utf-8")).hexdigest()[:8], 16) % 10000
+                    jitter_x = ((h % 100) / 100.0 - 0.5) * 0.04
+                    jitter_y = (((h // 100) % 100) / 100.0 - 0.5) * 0.04
+                    cx = max(0.01, min(0.99, round(cx + jitter_x, 4)))
+                    cy = max(0.01, min(0.99, round(cy + jitter_y, 4)))
+
                 turn = RealWebInteractionTurn(
                     turn_id=turn_idx,
                     url=t_data["url"],
@@ -978,6 +1436,7 @@ class RealTrajectoryCollator:
 
         all_action_indices: List[List[int]] = []
         all_action_types: List[List[int]] = []
+        all_action_masks: List[List[bool]] = []
         all_coords: List[List[Tuple[float, float]]] = []
 
         all_jepa_obs_t: List[torch.Tensor] = []
@@ -993,6 +1452,7 @@ class RealTrajectoryCollator:
 
             sample_action_idx: List[int] = []
             sample_act_types: List[int] = []
+            sample_act_masks: List[bool] = []
             sample_coords: List[Tuple[float, float]] = []
 
             # Encode task goal
@@ -1005,6 +1465,7 @@ class RealTrajectoryCollator:
 
             # Encode multi-turn steps
             for t_idx, turn in enumerate(sample.turns):
+                turn_start = len(seq_tokens)
                 # 1. Observation
                 obs_str = f"<obs> {turn.obs_text} </obs>"
                 obs_tokens = self.tokenizer.encode(obs_str)
@@ -1015,19 +1476,39 @@ class RealTrajectoryCollator:
                 seq_arg_mask.extend([False] * len(obs_tokens))
 
                 # 2. Thought (System 2 rationale)
-                thought_str = f"<thought> {turn.thought} </thought>"
-                thought_tokens = self.tokenizer.encode(thought_str)
-                seq_tokens.extend(thought_tokens)
-                # Labels for autoregressive reasoning loss
-                seq_labels.extend(thought_tokens)
-                seq_reason_mask.extend([True] * len(thought_tokens))
-                seq_arg_targets.extend([-100] * len(thought_tokens))
-                seq_arg_mask.extend([False] * len(thought_tokens))
+                if turn.rationale_mask and turn.thought:
+                    thought_tokens = self.tokenizer.encode(f"<thought> {turn.thought} </thought>")
+                    seq_tokens.extend(thought_tokens)
+                    # Only source-provided rationale tokens receive reasoning loss.
+                    seq_labels.extend(thought_tokens)
+                    seq_reason_mask.extend([True] * len(thought_tokens))
+                    seq_arg_targets.extend([-100] * len(thought_tokens))
+                    seq_arg_mask.extend([False] * len(thought_tokens))
+
+                # Keep each supervised action marker inside the model context. If
+                # prior turns already consume the budget, leave this turn for the
+                # next context window; for a single oversized observation, trim
+                # its tail while reserving room for the action marker.
+                if len(seq_tokens) + 2 > self.max_seq_len - 1:
+                    if sample_action_idx:
+                        seq_tokens = seq_tokens[:turn_start]
+                        seq_labels = seq_labels[:turn_start]
+                        seq_reason_mask = seq_reason_mask[:turn_start]
+                        seq_arg_targets = seq_arg_targets[:turn_start]
+                        seq_arg_mask = seq_arg_mask[:turn_start]
+                        break
+                    obs_cap = max(1, self.max_seq_len - 3)
+                    seq_tokens = seq_tokens[:obs_cap]
+                    seq_labels = seq_labels[:obs_cap]
+                    seq_reason_mask = seq_reason_mask[:obs_cap]
+                    seq_arg_targets = seq_arg_targets[:obs_cap]
+                    seq_arg_mask = seq_arg_mask[:obs_cap]
 
                 # 3. Action emission marker
                 action_pos = len(seq_tokens)
                 sample_action_idx.append(action_pos)
                 sample_act_types.append(int(turn.action_type))
+                sample_act_masks.append(bool(turn.action_type_mask))
                 sample_coords.append(turn.coordinates)
 
                 act_marker_tokens = [self.tokenizer.ACTION_TOKEN_ID, self.tokenizer.ACTION_END_TOKEN_ID]
@@ -1038,7 +1519,7 @@ class RealTrajectoryCollator:
                 seq_arg_mask.extend([False, False])
 
                 # 4. Argument tokens
-                if turn.argument:
+                if turn.argument and turn.argument_mask:
                     arg_str = f"<arg> {turn.argument} </arg>"
                     arg_tokens = self.tokenizer.encode(arg_str)
                     seq_tokens.extend(arg_tokens)
@@ -1070,6 +1551,7 @@ class RealTrajectoryCollator:
 
             all_action_indices.append(sample_action_idx)
             all_action_types.append(sample_act_types)
+            all_action_masks.append(sample_act_masks)
             all_coords.append(sample_coords)
 
             # JEPA transition pairs: (s_t, a_t, s_{t+1})
@@ -1124,13 +1606,17 @@ class RealTrajectoryCollator:
                 pos = min(all_action_indices[b][a_i], max_len - 1)
                 action_indices_tensor[b, a_i] = pos
                 action_type_targets_tensor[b, a_i] = all_action_types[b][a_i]
-                action_type_mask_tensor[b, a_i] = True
+                action_type_mask_tensor[b, a_i] = all_action_masks[b][a_i]
 
                 coords = all_coords[b][a_i]
                 coord_targets_tensor[b, a_i, 0] = coords[0]
                 coord_targets_tensor[b, a_i, 1] = coords[1]
                 # Spatial actions (CLICK) emit continuous coordinates
-                if all_action_types[b][a_i] == int(ActionType.CLICK):
+                turn = samples[b].turns[a_i]
+                if (
+                    turn.coordinate_mask
+                    and all_action_types[b][a_i] in (int(ActionType.CLICK), int(ActionType.SELECT))
+                ):
                     coord_loss_mask_tensor[b, a_i] = True
 
         # Collate JEPA transition tensors

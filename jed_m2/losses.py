@@ -32,7 +32,7 @@ class JEDM2LossConfig:
     gate_weight: float = 1.0  # Weight for action gate emission binary classification
     action_type_weight: float = 2.0  # Weight for discrete primitive classification
     coord_weight: float = 10.0  # Weight for continuous (x, y) spatial coordinates
-    arg_weight: float = 1.0  # Weight for argument token prediction
+    arg_weight: float = 2.0  # Weight for argument token prediction (calibrated for TYPE argument generation)
     jepa_weight: float = 1.0  # Weight for JEPA latent world model consistency
     aux_weight: float = 1.0  # Weight for MoE load-balancing auxiliary loss
 
@@ -156,7 +156,14 @@ class JEDM2CompositeLoss(nn.Module):
             valid_type_logits = gathered_type_logits[batch.action_type_mask]  # [N_acts, num_action_types]
             valid_type_targets = batch.action_type_targets[batch.action_type_mask]  # [N_acts]
 
-            loss_type = F.cross_entropy(valid_type_logits, valid_type_targets)
+            # Calibrated class weights: CLICK=0.5, TYPE=3.0, SCROLL=1.5, NAVIGATE=1.5, API_CALL=1.5, FINISH=2.0
+            legacy_type_weights = [0.5, 3.0, 1.5, 1.5, 1.5, 2.0]
+            type_weights = torch.tensor(
+                (legacy_type_weights + [2.0] * max(0, num_action_types - len(legacy_type_weights)))[:num_action_types],
+                device=valid_type_logits.device,
+                dtype=valid_type_logits.dtype,
+            )
+            loss_type = F.cross_entropy(valid_type_logits, valid_type_targets, weight=type_weights)
 
             # Compute classification accuracy
             preds = torch.argmax(valid_type_logits, dim=-1)

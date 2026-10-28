@@ -3,7 +3,7 @@ JED-M2 Dual-System Action Decoding Heads.
 Implements System 1 action emission heads:
 - ActionGate: Binary/scalar projection (hidden_dim -> 1) predicting when to emit an action vs continue latent reasoning.
 - ActionTypeHead: Discrete primitive classifier (hidden_dim -> hidden_dim // 2 -> GELU -> Dropout -> num_action_types)
-  covering primitives (CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH).
+  covering primitives (CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH, SELECT).
 - CoordinateHead: Spatial pointer regressor (hidden_dim -> hidden_dim // 4 -> GELU -> 2 -> Sigmoid)
   predicting normalized continuous coordinates (x, y) in [0, 1].
 - ArgumentHead: Linear projection (hidden_dim -> vocab_size) for tokenized arguments.
@@ -22,7 +22,11 @@ from jed_m2.mla import RMSNorm
 
 
 class ActionType(IntEnum):
-    """Discrete UI and digital environment interaction action primitives."""
+    """Discrete UI and digital environment interaction action primitives.
+
+    SELECT is appended at index 6 so six-class legacy checkpoints retain their
+    original output shape and class indices.
+    """
 
     CLICK = 0
     TYPE = 1
@@ -30,6 +34,7 @@ class ActionType(IntEnum):
     NAVIGATE = 3
     API_CALL = 4
     FINISH = 5
+    SELECT = 6
 
 
 @dataclass
