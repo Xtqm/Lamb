@@ -58,7 +58,7 @@ class JEDM2Config:
     model_size: Literal["nano", "medium"] = "nano"  # Model scale tier (Phase 11)
 
     # Dual-System Action Head parameters
-    num_action_types: int = 6  # CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH
+    num_action_types: int = 7  # CLICK, TYPE, SCROLL, NAVIGATE, API_CALL, FINISH, SELECT
     action_dropout: float = 0.1
     action_gate_threshold: float = 0.5
 
@@ -122,7 +122,7 @@ def JEDM2MediumConfig(max_seq_len: int = 2048, **kwargs) -> JEDM2Config:
         use_jepa=True,
         dense_intermediate_dim=1024,
         mha_head_dim=64,
-        num_action_types=6,
+        num_action_types=7,
         action_dropout=0.1,
         action_gate_threshold=0.5,
         image_size=224,

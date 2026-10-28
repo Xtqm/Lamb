@@ -32,7 +32,7 @@ class JEDM2LossConfig:
     gate_weight: float = 1.0  # Weight for action gate emission binary classification
     action_type_weight: float = 2.0  # Weight for discrete primitive classification
     coord_weight: float = 10.0  # Weight for continuous (x, y) spatial coordinates
-    arg_weight: float = 2.0  # Weight for argument token prediction (calibrated for TYPE argument generation)
+    arg_weight: float = 8.0  # Calibrated weight for argument token prediction (effective scale ~0.89 vs 0.22 legacy)
     jepa_weight: float = 1.0  # Weight for JEPA latent world model consistency
     aux_weight: float = 1.0  # Weight for MoE load-balancing auxiliary loss
 

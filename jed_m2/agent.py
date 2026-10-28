@@ -43,6 +43,7 @@ class AgentStepOutput:
     thought: str
     gate_prob: float
     num_thought_tokens: int
+    raw_coordinates: Tuple[float, float] = (0.0, 0.0)
     raw_action_output: Optional[ActionOutput] = None
     jepa_planning_scores: Optional[Dict[str, float]] = None
 
@@ -52,6 +53,7 @@ class AgentStepOutput:
             "action_type": self.action_name,
             "action_type_id": self.action_type_id,
             "coordinates": self.coordinates,
+            "raw_coordinates": self.raw_coordinates,
             "argument": self.argument,
             "thought": self.thought,
             "gate_prob": self.gate_prob,
@@ -70,6 +72,29 @@ class AgentStepOutput:
             f"Action: {self.action_name} at ({cx:.2f}, {cy:.2f}){arg_repr}{plan_repr} "
             f"[Gate={self.gate_prob:.3f}, ThoughtTokens={self.num_thought_tokens}]"
         )
+
+
+def _extract_element_center(element: Any) -> Optional[Tuple[float, float]]:
+    """Extracts (center_x, center_y) normalized coordinates in [0, 1] from an element or dict."""
+    if hasattr(element, "center") and element.center is not None:
+        try:
+            return (float(element.center[0]), float(element.center[1]))
+        except (IndexError, TypeError):
+            pass
+    if hasattr(element, "bbox") and element.bbox is not None:
+        try:
+            b = element.bbox
+            if len(b) >= 4:
+                return (float(b[0] + b[2]) / 2.0, float(b[1] + b[3]) / 2.0)
+        except (IndexError, TypeError):
+            pass
+    if isinstance(element, dict):
+        if "center" in element and isinstance(element["center"], (list, tuple)) and len(element["center"]) >= 2:
+            return (float(element["center"][0]), float(element["center"][1]))
+        if "bbox" in element and isinstance(element["bbox"], (list, tuple)) and len(element["bbox"]) >= 4:
+            b = element["bbox"]
+            return (float(b[0] + b[2]) / 2.0, float(b[1] + b[3]) / 2.0)
+    return None
 
 
 @dataclass
@@ -109,6 +134,8 @@ class JEDM2Agent:
         action_gate_threshold: float = 0.5,
         use_jepa_planning: bool = False,
         jepa_planning_lambda: float = 1.0,
+        snap_coordinates_to_candidates: bool = True,
+        max_snap_distance: Optional[float] = 0.20,
     ):
         self.model = model
         self.config = config if config is not None else getattr(model, "config", JEDM2Config())
@@ -125,6 +152,8 @@ class JEDM2Agent:
         self.action_gate_threshold = action_gate_threshold
         self.use_jepa_planning = use_jepa_planning
         self.jepa_planning_lambda = jepa_planning_lambda
+        self.snap_coordinates_to_candidates = snap_coordinates_to_candidates
+        self.max_snap_distance = max_snap_distance
 
         # Ensure model is in evaluation mode for live rollout
         self.model.eval()
@@ -282,6 +311,9 @@ class JEDM2Agent:
         obs_features: Optional[torch.Tensor] = None,
         screenshot: Optional[Union[torch.Tensor, Any]] = None,
         goal_embedding: Optional[torch.Tensor] = None,
+        candidate_elements: Optional[List[Any]] = None,
+        snap_coordinates: Optional[bool] = None,
+        max_snap_distance: Optional[float] = None,
         use_jepa_planning: Optional[bool] = None,
         jepa_planning_lambda: Optional[float] = None,
     ) -> AgentStepOutput:
@@ -291,14 +323,17 @@ class JEDM2Agent:
         2. System 2 (Latent Reasoning): Autoregressively generates thought tokens
            until ActionGate exceeds the commitment threshold or maximum length is reached.
         3. System 1 (Action Decoding): Emits discrete primitive, normalized (x, y) coordinates,
-           and argument payload, optionally grounded in visual screenshot patches and
-           refined via JEPA model-predictive latent rollout planning.
+           and argument payload, optionally grounded in visual screenshot patches, snapped to
+           the nearest interactive DOM candidate element, and refined via JEPA planning.
 
         Args:
             obs_text: Raw observation text from environment state.
             obs_features: Optional dense observation embedding for JEPA world model.
             screenshot: Optional [3, H, W] RGB tensor or PIL Image for visual grounding.
             goal_embedding: Optional target state latent embedding z_goal for JEPA planning.
+            candidate_elements: Optional list of candidate UIElements or dicts for coordinate snapping.
+            snap_coordinates: Optional override to enable/disable candidate bounding box snapping.
+            max_snap_distance: Optional maximum Euclidean distance threshold for snapping.
             use_jepa_planning: Optional override for active model-predictive JEPA planning.
             jepa_planning_lambda: Optional planning distance penalty factor.
 
@@ -429,11 +464,55 @@ class JEDM2Agent:
         raw_coords = action_output.coordinates.squeeze(0)  # [2]
         coord_x = float(raw_coords[0].clamp(0.0, 1.0).item())
         coord_y = float(raw_coords[1].clamp(0.0, 1.0).item())
-        coords = (coord_x, coord_y)
+        raw_coords_tuple = (coord_x, coord_y)
 
-        # Argument payload decoding
-        arg_token_id = int(torch.argmax(action_output.argument_logits, dim=-1).item())
-        arg_str = self.tokenizer.decode([arg_token_id]).strip()
+        # Candidate bounding box snapping
+        should_snap = self.snap_coordinates_to_candidates if snap_coordinates is None else snap_coordinates
+        snap_dist_limit = self.max_snap_distance if max_snap_distance is None else max_snap_distance
+
+        coords = raw_coords_tuple
+        if should_snap and candidate_elements and action_type in (ActionType.CLICK, ActionType.SELECT):
+            valid_candidates = []
+            for el in candidate_elements:
+                if getattr(el, "has_bbox", True):
+                    c = _extract_element_center(el)
+                    if c is not None:
+                        valid_candidates.append(c)
+
+            if valid_candidates:
+                best_center = min(
+                    valid_candidates,
+                    key=lambda c: (c[0] - coord_x) ** 2 + (c[1] - coord_y) ** 2,
+                )
+                dist_sq = (best_center[0] - coord_x) ** 2 + (best_center[1] - coord_y) ** 2
+                if snap_dist_limit is None or (dist_sq <= snap_dist_limit ** 2):
+                    coords = (float(best_center[0]), float(best_center[1]))
+
+        # Argument payload decoding (autoregressive unrolling for typing actions)
+        if action_type in (ActionType.TYPE, ActionType.SELECT):
+            arg_start_id = self.tokenizer.special_tokens.get("<arg>", 9)
+            arg_end_id = self.tokenizer.special_tokens.get("</arg>", 10)
+            eos_id = getattr(self.tokenizer, "EOS_TOKEN_ID", 2)
+            action_end_id = self.tokenizer.special_tokens.get("</action>", 8)
+
+            arg_tokens: List[int] = []
+            cur_lm, cur_act = self._feed_single_token(arg_start_id)
+            for _ in range(16):
+                next_tok_id = int(torch.argmax(cur_act.argument_logits, dim=-1).item())
+                if next_tok_id in (arg_end_id, eos_id, action_end_id):
+                    break
+                arg_tokens.append(next_tok_id)
+                cur_lm, cur_act = self._feed_single_token(next_tok_id)
+            self._feed_single_token(arg_end_id)
+
+            raw_arg_str = self.tokenizer.decode(arg_tokens).strip()
+            arg_str = " ".join([w for w in raw_arg_str.split() if not w.startswith("<") and not w.endswith(">")])
+            if not arg_str:
+                arg_token_id = int(torch.argmax(action_output.argument_logits, dim=-1).item())
+                arg_str = self.tokenizer.decode([arg_token_id]).strip()
+        else:
+            arg_token_id = int(torch.argmax(action_output.argument_logits, dim=-1).item())
+            arg_str = self.tokenizer.decode([arg_token_id]).strip()
 
         # Clean rationale text
         thought_text = self.tokenizer.decode(thought_tokens).strip()
@@ -459,6 +538,7 @@ class JEDM2Agent:
             thought=thought_text,
             gate_prob=gate_prob,
             num_thought_tokens=len(thought_tokens),
+            raw_coordinates=raw_coords_tuple,
             raw_action_output=action_output,
             jepa_planning_scores=jepa_planning_scores,
         )
@@ -488,12 +568,19 @@ class JEDM2Agent:
             if hasattr(env, "capture_screenshot"):
                 screenshot = env.capture_screenshot(as_tensor=True)
 
+        candidate_elements = None
+        if hasattr(env, "current_state") and env.current_state is not None:
+            candidate_elements = getattr(env.current_state, "elements", None)
+        if candidate_elements is None and hasattr(env, "active_elements"):
+            candidate_elements = getattr(env, "active_elements", None)
+
         goal_embedding = getattr(env, "goal_embedding", None)
         agent_output = self.act(
             obs_text=obs_text,
             obs_features=obs_features,
             screenshot=screenshot,
             goal_embedding=goal_embedding,
+            candidate_elements=candidate_elements,
         )
 
         step_res = env.step(

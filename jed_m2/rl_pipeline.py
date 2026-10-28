@@ -328,6 +328,23 @@ class TrajectoryRolloutSampler:
                 arg_str = self.tokenizer.decode([arg_token_id]).strip()
 
             coords = (coord_x, coord_y)
+            cand_list = None
+            if hasattr(env, "current_state") and env.current_state is not None:
+                cand_list = getattr(env.current_state, "elements", None)
+            if cand_list is None and hasattr(env, "active_elements"):
+                cand_list = getattr(env, "active_elements", None)
+            if cand_list and action_type in (ActionType.CLICK, ActionType.SELECT):
+                valid_cands = []
+                for e in cand_list:
+                    if getattr(e, "has_bbox", True):
+                        if hasattr(e, "center"):
+                            valid_cands.append((float(e.center[0]), float(e.center[1])))
+                        elif hasattr(e, "bbox") and len(e.bbox) >= 4:
+                            valid_cands.append(((float(e.bbox[0]) + float(e.bbox[2])) / 2.0, (float(e.bbox[1]) + float(e.bbox[3])) / 2.0))
+                if valid_cands:
+                    best_c = min(valid_cands, key=lambda c: (c[0] - coord_x) ** 2 + (c[1] - coord_y) ** 2)
+                    if (best_c[0] - coord_x) ** 2 + (best_c[1] - coord_y) ** 2 <= 0.20 ** 2:
+                        coords = (float(best_c[0]), float(best_c[1]))
 
             # Decode thought string
             thought_text = self.tokenizer.decode(thought_tokens).strip()

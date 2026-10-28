@@ -12,7 +12,7 @@ Target scale: ~45M total parameters / ~14M active parameters per token.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -231,6 +231,44 @@ class JEDM2Block(nn.Module):
         return x_t, next_state
 
 
+def adapt_state_dict_for_action_classes(
+    state_dict: Dict[str, Any], target_classes: int = 7
+) -> Dict[str, Any]:
+    """
+    Transparently adapts checkpoint state_dict by zero-padding action head output projections
+    if checkpoint was saved with fewer action classes (e.g. legacy 6-class checkpoints).
+    """
+    adapted = dict(state_dict)
+    weight_keys = [
+        "action_head.action_type_head.fc2.weight",
+        "action_type_head.fc2.weight",
+    ]
+    bias_keys = [
+        "action_head.action_type_head.fc2.bias",
+        "action_type_head.fc2.bias",
+    ]
+
+    for w_key in weight_keys:
+        if w_key in adapted:
+            w = adapted[w_key]
+            if w.ndim == 2 and w.shape[0] < target_classes:
+                old_classes, in_dim = w.shape
+                padded_w = torch.zeros((target_classes, in_dim), dtype=w.dtype, device=w.device)
+                padded_w[:old_classes, :] = w
+                adapted[w_key] = padded_w
+
+    for b_key in bias_keys:
+        if b_key in adapted:
+            b = adapted[b_key]
+            if b.ndim == 1 and b.shape[0] < target_classes:
+                old_classes = b.shape[0]
+                padded_b = torch.zeros((target_classes,), dtype=b.dtype, device=b.device)
+                padded_b[:old_classes] = b
+                adapted[b_key] = padded_b
+
+    return adapted
+
+
 class JEDM2Model(nn.Module):
     """
     Unified JED-M2 Large Action Model (LAM).
@@ -295,6 +333,14 @@ class JEDM2Model(nn.Module):
     def gradient_checkpointing_disable(self) -> None:
         """Disables gradient checkpointing."""
         self.gradient_checkpointing = False
+
+    def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True, **kwargs):
+        """
+        Loads state dict with automatic zero-padding adaptation for legacy action class counts.
+        """
+        target_classes = getattr(self.config, "num_action_types", 7)
+        adapted_dict = adapt_state_dict_for_action_classes(dict(state_dict), target_classes=target_classes)
+        return super().load_state_dict(adapted_dict, strict=strict, **kwargs)
 
     def forward(
         self,

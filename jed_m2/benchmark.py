@@ -185,7 +185,7 @@ class TaskEvaluator:
     screen coordinates, multi-turn trajectories, and latency profiles.
     """
 
-    NUM_ACTION_TYPES: int = 6
+    NUM_ACTION_TYPES: int = 7
     ACTION_NAMES: List[str] = [
         "CLICK",
         "TYPE",
@@ -193,6 +193,7 @@ class TaskEvaluator:
         "NAVIGATE",
         "API_CALL",
         "FINISH",
+        "SELECT",
     ]
 
     def __init__(self, tolerance_radius: float = 0.05):
