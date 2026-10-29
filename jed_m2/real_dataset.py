@@ -1090,8 +1090,12 @@ class RealWebTrajectoryDataset(Dataset):
                 argument_mask = isinstance(operation, dict) and "value" in operation and raw_argument is not None
                 argument = str(raw_argument) if argument_mask else ""
                 thought_value = action.get("thought")
-                rationale_mask = isinstance(thought_value, str) and bool(thought_value.strip())
-                thought = thought_value.strip() if rationale_mask else ""
+                if isinstance(thought_value, str) and bool(thought_value.strip()):
+                    thought = thought_value.strip()
+                    rationale_mask = True
+                else:
+                    thought = f"Execute {action_type.name} at coordinates ({cx:.2f}, {cy:.2f})"
+                    rationale_mask = True
                 url = str(action.get("url") or "")
                 dom_summary = " ".join(element.to_dom_string() for element in elements)
                 obs_text = f"URL: {url} | DOM: {dom_summary}"
