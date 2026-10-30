@@ -602,7 +602,7 @@ class RealWebTrajectoryDataset(Dataset):
         if self.real_only and self.real_manifest is not None:
             manifest_hash = self.real_manifest["manifest_sha256"]
             return self.cache_dir / (
-                f"real_web_real_v4_{manifest_hash[:16]}_{self.split}_h{self.hidden_dim}.pt"
+                f"real_web_real_v5_{manifest_hash[:16]}_{self.split}_h{self.hidden_dim}.pt"
             )
         has_m2w = False
         if self.raw_mind2web_dir and self.raw_mind2web_dir.exists():
@@ -1016,19 +1016,24 @@ class RealWebTrajectoryDataset(Dataset):
                 if not html_code:
                     continue
 
-                candidates = action.get("pos_candidates") or []
-                if not isinstance(candidates, list):
-                    candidates = []
+                pos_candidates = action.get("pos_candidates") or []
+                if not isinstance(pos_candidates, list):
+                    pos_candidates = []
+                neg_candidates = action.get("neg_candidates") or []
+                if not isinstance(neg_candidates, list):
+                    neg_candidates = []
+
                 original_candidates = [
-                    candidate for candidate in candidates
+                    candidate for candidate in pos_candidates
                     if isinstance(candidate, dict)
                     and str(candidate.get("is_original_target", "")).casefold() == "true"
                 ]
                 original_candidate = original_candidates[0] if len(original_candidates) == 1 else None
 
+                all_candidates = pos_candidates + neg_candidates
                 bbox_map: Dict[str, Tuple[float, float, float, float]] = {}
                 candidate_ids: Dict[str, List[List[float]]] = {}
-                for candidate in candidates:
+                for candidate in all_candidates:
                     if not isinstance(candidate, dict):
                         continue
                     candidate_attrs = self._candidate_attributes(candidate)

@@ -154,3 +154,39 @@ def test_metric_rates_dual_mode():
     assert rates["snapped_step_accuracy"] == 0.7
     assert rates["exact_trajectory_match_rate"] == 0.0
     assert rates["snapped_exact_trajectory_match_rate"] == 0.5
+
+
+def test_real_dataset_multi_element_distractor_candidates():
+    from jed_m2.real_dataset import RealWebTrajectoryDataset
+
+    cfg = JEDM2Config()
+    dataset = RealWebTrajectoryDataset(
+        config=cfg,
+        split="test",
+        real_only=True,
+        manifest_path="data/manifests/real_mind2web_v1/manifest.json",
+        raw_mind2web_dir="data/raw_mind2web",
+        cache_dir="data/real_trajectories_cache",
+        seed=42,
+    )
+    assert len(dataset) > 0
+    sample = dataset[0]
+    turn = sample.turns[0]
+    cands_with_bbox = [e for e in turn.interactive_elements if getattr(e, "has_bbox", False)]
+    # With distractor ingestion (pos_candidates + neg_candidates), candidate count must be > 1
+    assert len(cands_with_bbox) > 1, f"Expected >1 candidates with bboxes, found {len(cands_with_bbox)}"
+
+    # Verify snapping can discriminate and select a distractor if closer to it
+    target_id = turn.target_element_id
+    distractor = next((e for e in cands_with_bbox if e.element_id != target_id), None)
+    assert distractor is not None
+    assert distractor.center is not None
+    
+    # Fake a point right next to the distractor
+    fake_pt = (distractor.center[0] + 0.001, distractor.center[1] + 0.001)
+    best_cand = min(
+        cands_with_bbox,
+        key=lambda e: (e.center[0] - fake_pt[0]) ** 2 + (e.center[1] - fake_pt[1]) ** 2,
+    )
+    assert best_cand.element_id == distractor.element_id, "Candidate snapping should snap to the nearest distractor"
+

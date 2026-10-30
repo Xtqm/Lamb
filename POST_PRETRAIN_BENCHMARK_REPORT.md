@@ -1,7 +1,9 @@
 # Post-Pretraining Scientific Benchmark Report: Unified JED-M2 Large Action Model
 
-**Evaluation Date**: 2026-10-28  
-**Dataset Split**: Site-Held-Out Mind2Web Test Split (147 tasks, 569 context windows, 1,178 actions across 11 unseen websites)  
+**Evaluation Date**: October 30, 2026  
+**Audited & Aligned Commit**: Reflecting distractor-grounding and full-candidate pool alignment  
+**Dataset Split**: Site-Held-Out Mind2Web Test Split (147 tasks, 573 context windows, 1,178 actions across 11 unseen websites)  
+**Candidate Pool Distribution**: Mean $33.71$ interactive elements with bounding boxes per turn (Min: 2, Max: 64)  
 **Interactive Environments**: WebOS Closed-Loop Simulation (`ecommerce`, `travel`, `os_admin`)  
 **Hardware**: NVIDIA GeForce RTX 5060 Laptop GPU (Pure PyTorch, bfloat16, Peak VRAM < 3.4 GB)  
 **Evaluated Checkpoints**:
@@ -11,65 +13,63 @@
 
 ---
 
-## 1. Executive Summary
+## 1. Executive Summary & Audit Resolution
 
-Following the completion of the unified trajectory pretraining run (trained on a unified corpus merging 11 Mind2Web training chunks with 812 WebArena tasks), this report establishes the final comparative benchmarks for the **JED-M2 Large Action Model**.
+Following the adversarial scientific audit of October 29, 2026, this report presents verified, leakage-free empirical benchmarks for the **JED-M2 Large Action Model**. 
 
-### Major Breakthroughs:
-1. **10.5x Lift in Trajectory Match Rate over Baseline D**:
-   On unseen websites, end-to-end task completion without teacher-forcing jumped from **2.72%** (Baseline D) to **28.57%** (New Unified JED-M2), with Step Accuracy leaping from **37.58% to 81.43%** (+43.85 percentage points).
-2. **Native 7th Action Primitive (`SELECT`) Mastery**:
-   Prior to this run, `SELECT` dropdown actions were either unscorable (Legacy Pretrained: 0/53, 0.0%) or misclassified (Baseline D: 0/53, 0.0%). The retrained JED-M2 model predicts `SELECT` actions on unseen websites with **94.34% accuracy** (50/53).
-3. **Form-Interaction Recovery (`TYPE`)**:
-   In Baseline D, severe class imbalance caused the policy to degenerate into a click-only heuristic (`TYPE` accuracy = 0/138, 0.0%). The Unified JED-M2 model achieves **100.0% accuracy** (138/138) on `TYPE` actions.
-4. **Candidate DOM Snapping Efficacy**:
-   Snapping continuous coordinate predictions $\hat{c}$ to nearest candidate bounding boxes achieves a **100.00% Target Element Hit Rate** across all interactable elements on unseen websites.
-5. **Compute & Parameter Efficiency**:
-   With only **24.1M active parameters** per token via MoE routing, JED-M2 matches the performance of the 19,500-step dense model in just **3,000 steps** (6.5x fewer training steps), while natively supporting multi-modal toolsets.
+### Critical Methodological Corrections Implemented:
+1. **Full-Page Distractor Candidate Ingestion**:
+   Previously, bounding boxes were extracted exclusively from `pos_candidates` (the single human-annotated target element), creating an artificial $N=1$ candidate pool that trivially produced a 100.00% hit rate. The data pipeline has been corrected to ingest both `pos_candidates` and `neg_candidates`, producing realistic multi-element candidate pools averaging **33.71 interactive elements per turn**.
+2. **Metric Hierarchy Realignment**:
+   In accordance with publication standards, **Unassisted Raw Continuous Coordinate Metrics** are treated as the primary baseline for spatial grounding, while **Multi-Element Candidate Snapping** is evaluated as an operational post-processing layer.
+3. **Transparent Characterization of Multi-Token Argument Generation**:
+   The report explicitly disaggregates discrete tool prediction from free-form token string generation, disclosing the exact token sequence match rate.
 
 ---
 
 ## 2. Comparative Benchmark on Site-Held-Out Mind2Web Test Split
 
-The table below details performance across the 147 test tasks (11 unseen websites, 1,178 actions) comparing unconstrained raw continuous coordinates against distance-gated candidate-snapped coordinates ($\le 0.20$):
+The table below contrasts performance across 147 test tasks (11 unseen websites, 1,178 actions) under multi-element distractor conditions (average 33.7 candidates per turn):
 
-| Architecture & Checkpoint | Active Params | Pretraining Steps | Action Classes | Overall Action Acc | CLICK Acc | TYPE Acc | SELECT Acc | Raw Target Hit | Snapped Target Hit | Raw Step Acc | Snapped Step Acc | Snapped Traj Match |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Legacy Pretrained Nano** | 52.4M (100%) | 19,500 | 6 (Legacy) | 100.0%* | 100.0% (972/972) | 100.0% (138/138) | **0.0%** (Unscorable) | 79.58% | **100.00%** | 83.42% | 84.41% | **29.93%** |
-| **Baseline D (Ablation Seed 42)** | 24.1M (46%) | ~2,500 | 6 (Legacy) | 83.58% | 100.0% (972/972) | **0.0%** (0/138) | **0.0%** (0/53) | 1.25% | 12.08% | 35.25% | 37.58% | **2.72%** |
-| **New Unified JED-M2 (Step 3,000)** | 24.1M (46%) | 3,000 | **7 (Native)** | **99.74%** | **100.0%** (972/972) | **100.0%** (138/138) | **94.34%** (50/53) | 74.58% | **100.00%** | 81.17% | **81.43%** | **28.57%** |
+| Architecture & Checkpoint | Active Params | Pretrain Steps | Action Primitives | Action Accuracy | CLICK Acc | TYPE Acc | SELECT Acc | Continuous Coord MAE | Raw Target Hit Rate | Snapped Hit Rate ($\le 0.20$, 33.7 cands) | Raw Step Acc | Snapped Step Acc | Raw Trajectory Match | Snapped Trajectory Match |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Legacy Pretrained Nano** | 52.4M (100%) | 19,500 | 6 (Legacy) | 100.0%* | 100.0% (986/986) | 100.0% (138/138) | **0.0%** (Unscorable) | **0.0121** | **78.78%** | **93.47%** | **83.72%** | **80.78%** | **27.89%** | **20.41%** |
+| **Baseline D (Ablation Seed 42)** | 24.1M (46%) | ~2,500 | 7 (Early) | 83.70% | 100.0% (986/986) | **0.0%** (0/138) | **0.0%** (0/54) | 0.2679 | 1.63% | **4.49%** | 35.48% | 36.25% | 2.72% | 2.72% |
+| **New Unified JED-M2 (Step 3,000)** | 24.1M (46%) | 3,000 | **7 (Native)** | **99.75%** | **100.0%** (986/986) | **100.0%** (138/138) | **94.44%** (51/54) | **0.0148** | **75.10%** | **93.06%** | **81.24%** | **77.33%** | **27.21%** | **21.77%** |
 
-*\*Note: Legacy Pretrained action accuracy excludes the 53 `SELECT` actions which were unscorable in its 6-class head.*
+*\*Note: Legacy Pretrained action accuracy excludes the 54 `SELECT` actions which were unsupported and unscorable in its 6-class head.*
 
 ---
 
-## 3. Detailed Action Primitive Breakdown
+## 3. In-Depth Empirical Findings
 
-### A. Discrete Tool Classification
-- **CLICK**: 972 / 972 correct (**100.00%**)
+### A. Spatial Coordinate Grounding & Distractor Discrimination
+1. **Unassisted Grounding Precision**:
+   Without any snapping heuristics, JED-M2 predicts continuous normalized $(x, y)$ coordinates with an MAE of **0.0148** (less than 1.5% of viewport width/height), achieving an unassisted Target Element Hit Rate of **75.10%** (184 / 245 target elements hit) and a Coordinate Tolerance Accuracy of **90.59%** ($\le 0.05$ radius).
+2. **Discrimination Across 33.7 Distractors**:
+   When candidate snapping is applied against the multi-element pool, the target hit rate increases from **75.10% to 93.06%** (228 / 245 target elements hit).
+3. **Snapping Cannot Compensate for Weak Grounding**:
+   In Baseline D, where continuous coordinate MAE is poor (0.2679), candidate snapping against 33.7 distractors only hits the target **4.49%** of the time. This confirms that candidate snapping in JED-M2 succeeds because of genuine underlying spatial representations, not accidental proximity.
+4. **Trade-off in Clustered Layouts**:
+   In densely clustered UI sections, snapping a slightly off-center click can occasionally gravitate toward an adjacent distractor, explaining why raw step accuracy is **81.24%** vs snapped step accuracy of **77.33%**.
+
+### B. Action Primitive Classification
+- **CLICK**: 986 / 986 correct (**100.00%**)
 - **TYPE**: 138 / 138 correct (**100.00%**)
-- **SELECT**: 50 / 53 correct (**94.34%**) — previously 0.0% in all models!
-- **Macro F1 Score**: **0.981** across all tool primitives.
+- **SELECT**: 51 / 54 correct (**94.44%**) — previously 0.0% in all models!
+- **Overall Macro F1**: **0.982** across all discrete tools.
 
-### B. Spatial Coordinate Grounding
-- **Continuous Coordinate MAE**:
-  - Raw unconstrained: **0.0151** (in normalized $[0, 1]^2$ screen space)
-  - Distance-gated candidate snapping: **0.0105** (a 30.4% reduction in coordinate deviation)
-- **Coordinate Tolerance Accuracy** ($\le 0.05$ radius or inside element bounding box):
-  - Raw: **90.61%**
-  - Candidate Snapped: **91.10%**
-- **Target Element Hit Rate**:
-  - Raw continuous: **74.58%**
-  - Candidate Snapped ($\le 0.20$): **100.00%** (240 / 240 valid elements hit)
-
-### C. System 2 Multi-Token Argument Generation
-- Calibrated argument weight ($\alpha_{\text{arg}} = 8.0$) enabled the model to begin generating exact token sequences for search strings and form data, delivering a **57% relative improvement** in exact argument token sequence matching over the legacy model.
+### C. Multi-Token Argument String Generation (Transparent Disclosure)
+- **Total `TYPE` Actions**: 138
+- **Correct Action Type Classification**: 138 / 138 (**100.00%**)
+- **Exact Token-for-Token String Match**: **2 / 138 (1.45%)**
+- *Scientific Assessment*: While the model reliably identifies when text input is required and grounds clicks into search and input fields, generating exact character-level strings from scratch remains an open challenge for sub-100M parameter models without external retrieval or dedicated language backbone scaling. Step accuracy remains high (81.24%) because 1,040 of the 1,178 actions are non-typing interactions (`CLICK`, `SELECT`).
 
 ---
 
 ## 4. Online Closed-Loop Interactive Evaluation (Method B)
 
-Evaluated across 15 closed-loop episodes (5 per scenario: `ecommerce`, `travel`, `os_admin`):
+Evaluated across 15 closed-loop episodes (5 per scenario: `ecommerce`, `travel`, `os_admin` in `WebOSEnvironment`):
 
 | Model & Execution Mode | Task Success Rate (SR %) | Mean Step Success Rate | Mean Steps / Episode | Mean Cumulative Reward |
 | :--- | :---: | :---: | :---: | :---: |
@@ -77,16 +77,16 @@ Evaluated across 15 closed-loop episodes (5 per scenario: `ecommerce`, `travel`,
 | **New Unified (Greedy / No JEPA)** | 0.00% | 25.00% | 8.00 | -0.72 |
 | **New Unified (JEPA Planning $\lambda=1.0$)** | 0.00% | 25.00% | 8.00 | -0.72 |
 
-### Key Insight on Closed-Loop Autonomy:
-While pretraining on offline teacher-forced demonstrations provides representations for single-step perception and grounding (yielding 81.43% Step Accuracy), multi-step closed-loop autonomy requires reinforcement learning (e.g. GRPO / PPO) to learn multi-turn error recovery. The agent successfully executes individual complex subgoals (such as locating and typing into the search bar on Turn 1), but requires closed-loop policy fine-tuning to transition between search submission and result filtering.
+### Root Cause of Interactive Truncation:
+The agent successfully executes initial subgoals (e.g. typing query into the search bar and clicking the search button on Turns 0 and 1 of `ecommerce`), but fails to emit `ActionType.FINISH` when the objective is met, causing the environment to truncate at 8 steps with zero terminal reward. Furthermore, dynamic state transitions outside the expert training distribution trigger covariate shift. This empirical finding establishes the necessity of **Phase 4: Online Reinforcement Learning (GRPO)** to teach task termination and closed-loop error recovery.
 
 ---
 
-## 5. Artifact Verification & Preservation
+## 5. Artifact Verification & Data Integrity
 
-1. **Evaluation Metrics JSON**: `runs/ablation/post_pretrain_evaluation.json`
+1. **Evaluation Metrics JSON**: `runs/ablation/post_pretrain_evaluation.json` (regenerated with multi-element candidate pools)
 2. **Model Weights**: `checkpoints/pretrain_unified/jed_m2_nano_pretrain_final.pt` (308.6 MB, Step 3,000)
-3. **Training Caches**:
+3. **Dataset Caches**:
+   - `data/real_trajectories_cache/real_web_real_v5_..._test_h512.pt` (regenerated with multi-element candidate bboxes)
    - `data/real_trajectories_cache/unified_pretrain_train_5000_h512_seed42.pt` (149.5 MB)
-   - `data/real_trajectories_cache/unified_pretrain_val_500_h512_seed10042.pt` (24.2 MB)
-4. **Test Suite Status**: 37 passed, 1 skipped (100% green, 0 regressions).
+4. **Test Suite Status**: 38 passed, 0 failed, 1 skipped (100% green).
