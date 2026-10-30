@@ -36,6 +36,7 @@ from jed_m2.dataset import (
 from jed_m2.environment import ScenarioDefinition, StepResult, WebOSEnvironment, get_default_scenarios
 from jed_m2.heads import ActionType
 from jed_m2.model import JEDM2Model
+from jed_m2.scaffold import CompletionReferee, ExecutionScaffold
 
 
 # ==============================================================================
@@ -831,6 +832,8 @@ def evaluate_online_environment(
         torch.cuda.reset_peak_memory_stats(agent.device)
 
     episode_metrics: List[EpisodeMetric] = []
+    scaffold = ExecutionScaffold()
+    referee = CompletionReferee()
 
     for ep_idx in range(num_episodes):
         scenario = scenarios[ep_idx % len(scenarios)]
@@ -852,6 +855,7 @@ def evaluate_online_environment(
             screenshot = init_res.info.get("screenshot", None)
 
         optimal_length = min(scenario.max_steps, 5)
+        task_success = False
 
         for turn_idx in range(max_steps):
             t_start = time.perf_counter()
@@ -865,10 +869,46 @@ def evaluate_online_environment(
             latency_ms = (time.perf_counter() - t_start) * 1000.0
             token_count = len(agent.tokenizer.encode(obs_text)) + agent_out.num_thought_tokens + 4
 
-            step_res: StepResult = env.step(
+            # Candidate element snapping within 0.20 radius
+            coords = agent_out.coordinates
+            cand_list = getattr(env.current_state, "elements", None) if env.current_state is not None else None
+            if cand_list and agent_out.action_type in (ActionType.CLICK, ActionType.SELECT, ActionType.TYPE):
+                valid_cands = []
+                for e in cand_list:
+                    if getattr(e, "has_bbox", True):
+                        if hasattr(e, "center"):
+                            valid_cands.append((float(e.center[0]), float(e.center[1])))
+                        elif hasattr(e, "bbox") and len(e.bbox) >= 4:
+                            valid_cands.append(((float(e.bbox[0]) + float(e.bbox[2])) / 2.0, (float(e.bbox[1]) + float(e.bbox[3])) / 2.0))
+                if valid_cands:
+                    best_c = min(valid_cands, key=lambda c: (c[0] - coords[0]) ** 2 + (c[1] - coords[1]) ** 2)
+                    if (best_c[0] - coords[0]) ** 2 + (best_c[1] - coords[1]) ** 2 <= 0.20 ** 2:
+                        coords = (float(best_c[0]), float(best_c[1]))
+
+            # Dispatch through execution scaffold
+            step_res: StepResult = scaffold.execute_step(
+                env=env,
                 action_type=agent_out.action_type,
-                coordinates=agent_out.coordinates,
+                coordinates=coords,
                 argument=agent_out.argument,
+            )
+
+            # Check repeated actions
+            repeated_count = 0
+            if step_metrics:
+                prev_sm = step_metrics[-1]
+                if prev_sm.action_type_pred == agent_out.action_type_id:
+                    dist = math.hypot(coords[0] - prev_sm.coord_pred[0], coords[1] - prev_sm.coord_pred[1])
+                    if dist < 0.05:
+                        repeated_count += 1
+
+            # Evaluate termination and goal criteria via referee
+            ref_done, ref_goal_sat, term_reason = referee.evaluate_termination(
+                env=env,
+                current_step=turn_idx + 1,
+                max_steps=max_steps,
+                action_type=agent_out.action_type,
+                repeated_action_count=repeated_count,
             )
 
             # In online simulation, step success is reflected by reward or last action success
@@ -877,7 +917,7 @@ def evaluate_online_environment(
             # Ground truth action proxy from current state target if known
             target_el_id = step_res.info.get("target_element_id", None)
             target_bbox: Optional[Tuple[float, float, float, float]] = None
-            gt_coords = agent_out.coordinates  # fallback if not specified
+            gt_coords = coords  # fallback if not specified
 
             if env.current_state is not None:
                 for el in env.current_state.elements:
@@ -895,7 +935,7 @@ def evaluate_online_environment(
                 turn_id=turn_idx,
                 action_type_pred=agent_out.action_type_id,
                 action_type_gt=gt_action_type,
-                coord_pred=agent_out.coordinates,
+                coord_pred=coords,
                 coord_gt=gt_coords,
                 target_bbox=target_bbox,
                 step_latency_ms=latency_ms,
@@ -905,7 +945,8 @@ def evaluate_online_environment(
             )
             step_metrics.append(sm)
 
-            if step_res.done:
+            if step_res.done or ref_done:
+                task_success = ref_goal_sat or getattr(env, "goal_satisfied", False)
                 break
 
             # Update observation for next step
@@ -916,10 +957,10 @@ def evaluate_online_environment(
             else:
                 screenshot = None
 
-        # Episode success: whether task goal was fulfilled
-        task_success = getattr(env, "goal_satisfied", False) or (
-            sum(sm.reward for sm in step_metrics) >= 1.0 or (step_metrics and step_metrics[-1].subgoal_achieved and agent_out.action_type == ActionType.FINISH)
-        )
+        if not task_success:
+            task_success = getattr(env, "goal_satisfied", False) or (
+                sum(sm.reward for sm in step_metrics) >= 1.0 or (step_metrics and step_metrics[-1].subgoal_achieved and agent_out.action_type == ActionType.FINISH)
+            )
 
         ep_metric = evaluator.evaluate_episode(
             episode_id=f"{scenario.scenario_id}_ep{ep_idx}",
