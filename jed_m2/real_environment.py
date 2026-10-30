@@ -240,6 +240,16 @@ class RealTaskDOMEnvironment:
         """Returns True if the task was completed successfully."""
         return self._goal_satisfied
 
+    def check_goal_criteria(self) -> bool:
+        """Evaluates whether the task goal criteria or final turn have been reached."""
+        if self._goal_satisfied:
+            return True
+        if self.active_task and self.active_task.turns:
+            num_turns = len(self.active_task.turns)
+            if self.current_turn_idx >= num_turns - 1 and self.step_count > 0:
+                return True
+        return False
+
     @property
     def active_scenario(self) -> Any:
         """Duck-typed scenario interface for compatibility with rollout samplers."""
@@ -594,6 +604,7 @@ class RealTaskDOMEnvironment:
             "task_id": self.active_task.task_id,
             "turn_idx": self.current_turn_idx,
             "step_success": oracle_info["step_success"],
+            "goal_criteria_met": self.check_goal_criteria(),
             "oracle": oracle_info,
         }
 

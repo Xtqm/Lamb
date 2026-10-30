@@ -23,6 +23,7 @@ from jed_m2.dataset import SimpleLAMTokenizer
 from jed_m2.environment import ScenarioDefinition, StepResult, WebOSEnvironment, get_default_scenarios
 from jed_m2.heads import ActionOutput, ActionType
 from jed_m2.model import JEDM2Model
+from jed_m2.scaffold import CompletionReferee, ExecutionScaffold
 from jed_m2.rl import (
     compute_action_type_log_probs,
     compute_coordinate_log_probs,
@@ -141,6 +142,8 @@ class TrajectoryRolloutSampler:
         self.max_thought_tokens = max_thought_tokens
         self.action_gate_threshold = action_gate_threshold
         self.scenarios = get_default_scenarios()
+        self.scaffold = ExecutionScaffold(clear_input_before_type=True)
+        self.referee = CompletionReferee()
 
     def sample_trajectory(
         self,
@@ -333,7 +336,7 @@ class TrajectoryRolloutSampler:
                 cand_list = getattr(env.current_state, "elements", None)
             if cand_list is None and hasattr(env, "active_elements"):
                 cand_list = getattr(env, "active_elements", None)
-            if cand_list and action_type in (ActionType.CLICK, ActionType.SELECT):
+            if cand_list and action_type in (ActionType.CLICK, ActionType.SELECT, ActionType.TYPE):
                 valid_cands = []
                 for e in cand_list:
                     if getattr(e, "has_bbox", True):
@@ -349,13 +352,35 @@ class TrajectoryRolloutSampler:
             # Decode thought string
             thought_text = self.tokenizer.decode(thought_tokens).strip()
 
-            # Dispatch action to environment
-            step_res = env.step(
+            # Dispatch action to environment via deterministic macro-action scaffold
+            step_res = self.scaffold.execute_step(
+                env=env,
                 action_type=action_type,
                 coordinates=coords,
                 argument=arg_str,
             )
             step_rewards.append(step_res.reward)
+
+            # Check repeated actions
+            repeated_count = 0
+            if turns:
+                prev_turn = turns[-1]
+                if prev_turn.action_type == action_type:
+                    dist = math.hypot(coords[0] - prev_turn.coordinates[0], coords[1] - prev_turn.coordinates[1])
+                    if dist < 0.05:
+                        repeated_count += 1
+
+            # Evaluate termination and goal status via CompletionReferee
+            referee_done, referee_goal_satisfied, term_reason = self.referee.evaluate_termination(
+                env=env,
+                current_step=turn_idx + 1,
+                max_steps=max_turns,
+                action_type=action_type,
+                repeated_action_count=repeated_count,
+            )
+            is_done = step_res.done or referee_done
+            if referee_goal_satisfied and hasattr(env, "goal_satisfied"):
+                env.goal_satisfied = True
 
             # Action primitive token (trainable)
             act_tok = self.tokenizer.encode(action_type.name)[0]
@@ -451,21 +476,22 @@ class TrajectoryRolloutSampler:
                 step_tokens=turn_tokens,
                 step_mask=turn_mask,
                 reward=step_res.reward,
-                done=step_res.done,
+                done=is_done,
                 gate_prob=gate_prob,
                 coord_logp=coord_logp,
             )
             turns.append(record)
 
             obs_text = step_res.obs_text
-            if step_res.done:
+            if is_done:
                 break
 
         # Append terminal EOS token
         all_tokens.append(self.tokenizer.EOS_TOKEN_ID)
         all_mask.append(False)
 
-        terminal_reward = 1.0 if env.goal_satisfied else 0.0
+        is_success = bool(getattr(env, "goal_satisfied", False) or CompletionReferee.is_goal_satisfied(env))
+        terminal_reward = 1.0 if is_success else 0.0
         cumulative_reward = float(env.current_state.cumulative_reward) if env.current_state else 0.0
 
         return RolloutTrajectory(
@@ -477,7 +503,7 @@ class TrajectoryRolloutSampler:
             step_rewards=step_rewards,
             cumulative_reward=cumulative_reward,
             terminal_reward=terminal_reward,
-            success=env.goal_satisfied,
+            success=is_success,
             num_steps=len(turns),
         )
 
@@ -708,12 +734,17 @@ class TrajectoryRolloutSampler:
                             repeated_count += 1
 
                 milestone_count = sum(1 for t in traj.turns if t.reward > 0.0 and not t.done)
+                type_matches = sum(1 for t in traj.turns if t.reward >= 0.1)
+                arg_matches = sum(1 for t in traj.turns if t.argument and t.reward > 0.0)
+                iou_estimate = sum(0.2 for t in traj.turns if t.reward >= 0.2)
                 shaped_r = compute_shaped_reward(
                     goal_satisfied=traj.success,
                     milestones_count=milestone_count,
                     turn_count=len(traj.turns),
-                    iou_sum=0.5 if traj.success else 0.0,
+                    iou_sum=iou_estimate + (0.5 if traj.success else 0.0),
                     repeated_action_count=repeated_count,
+                    action_type_matches=type_matches,
+                    argument_matches=arg_matches,
                 )
                 raw_rewards.append(shaped_r)
             elif reward_mode == "terminal":

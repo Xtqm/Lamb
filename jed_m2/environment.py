@@ -228,7 +228,7 @@ class WebOSEnvironment:
                     tag="a",
                     role="first_product_link",
                     text="Sony WH-1000XM5 Wireless Noise-Cancelling Headphones ($398.00)",
-                    bbox=(0.15, 0.25, 0.85, 0.45),
+                    bbox=(0.10, 0.15, 0.90, 0.45),
                     is_clickable=True,
                 )
             )
@@ -513,6 +513,22 @@ class WebOSEnvironment:
     # Observation Generator & Spatial Hit-Testing
     # --------------------------------------------------------------------------
 
+    def check_goal_criteria(self) -> bool:
+        """Evaluates whether the active scenario goal criteria have been met."""
+        if self.goal_satisfied:
+            return True
+        if self.current_state is None:
+            return False
+        domain = self.active_scenario.scenario_id
+        stage = self.current_state.metadata.get("stage", "")
+        if domain == "ecommerce":
+            return stage == "cart_confirmed" or len(self.current_state.metadata.get("cart", [])) > 0
+        elif domain == "travel":
+            return stage == "booked" or bool(self.current_state.metadata.get("booked", False))
+        elif domain == "os_admin":
+            return stage == "rules_saved" or len(self.current_state.metadata.get("rules", [])) > 0
+        return False
+
     def hit_test(self, x: float, y: float) -> Optional[UIElement]:
         """
         Performs continuous spatial hit-testing across active UI elements.
@@ -737,7 +753,7 @@ class WebOSEnvironment:
                         self.current_state.metadata["stage"] = "results"
                         step_reward += 0.20
 
-                    elif hit_element.role == "reserve_room" and stage == "results":
+                    elif hit_element.role in ("reserve_room", "item_card") and stage == "results":
                         url, title, elements = self._build_travel_page("booked")
                         self.current_state.url = url
                         self.current_state.title = title
@@ -801,12 +817,33 @@ class WebOSEnvironment:
                 target_el.value = arg_str
                 step_reward += 0.15
 
-                # Auto-transition for typed queries
+                # Auto-transition for typed queries (simulating Enter key submission)
                 domain = self.active_scenario.scenario_id
-                if domain == "ecommerce" and "headphone" in arg_str.lower():
+                stage = self.current_state.metadata.get("stage", "")
+                if domain == "ecommerce" and ("headphone" in arg_str.lower() or target_el.role == "search_bar") and stage == "home":
                     self.current_state.metadata["typed_query"] = arg_str
-                elif domain == "travel" and "francisco" in arg_str.lower():
+                    url, title, elements = self._build_ecommerce_page("results")
+                    self.current_state.url = url
+                    self.current_state.title = title
+                    self.current_state.elements = elements
+                    self.current_state.metadata["stage"] = "results"
+                    step_reward += 0.20
+                elif domain == "travel" and ("francisco" in arg_str.lower() or target_el.role == "location_input") and stage == "home":
                     self.current_state.metadata["destination"] = arg_str
+                    url, title, elements = self._build_travel_page("results")
+                    self.current_state.url = url
+                    self.current_state.title = title
+                    self.current_state.elements = elements
+                    self.current_state.metadata["stage"] = "results"
+                    step_reward += 0.20
+                elif domain == "os_admin" and stage == "edit_rules":
+                    self.current_state.metadata["rules"].append(arg_str)
+                    url, title, elements = self._build_os_admin_page("rules_saved")
+                    self.current_state.url = url
+                    self.current_state.title = title
+                    self.current_state.elements = elements
+                    self.current_state.metadata["stage"] = "rules_saved"
+                    step_reward += 0.20
             else:
                 step_reward -= 0.10
 
@@ -853,20 +890,7 @@ class WebOSEnvironment:
             self.is_terminated = True
 
             # Evaluate goal criteria
-            domain = self.active_scenario.scenario_id
-            stage = self.current_state.metadata.get("stage", "")
-
-            if domain == "ecommerce":
-                if stage == "cart_confirmed" or len(self.current_state.metadata.get("cart", [])) > 0:
-                    self.goal_satisfied = True
-            elif domain == "travel":
-                if stage == "booked" or self.current_state.metadata.get("booked", False):
-                    self.goal_satisfied = True
-            elif domain == "os_admin":
-                if stage == "rules_saved" or len(self.current_state.metadata.get("rules", [])) > 0:
-                    self.goal_satisfied = True
-            else:
-                self.goal_satisfied = True
+            self.goal_satisfied = self.check_goal_criteria()
 
             if self.goal_satisfied:
                 step_reward += 1.0  # Terminal success bonus
@@ -892,6 +916,7 @@ class WebOSEnvironment:
             "hit_element": hit_element.text if hit_element else None,
             "action_success": action_success,
             "goal_satisfied": self.goal_satisfied,
+            "goal_criteria_met": self.check_goal_criteria(),
             "cumulative_reward": self.current_state.cumulative_reward,
         }
 

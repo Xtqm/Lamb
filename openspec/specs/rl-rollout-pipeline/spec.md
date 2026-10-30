@@ -7,7 +7,7 @@ Enables closed-loop reinforcement learning and preference optimization for JED-M
 ## Requirements
 
 ### Requirement: Stochastic Interactive Trajectory Sampling
-The system SHALL sample multi-turn interaction trajectories in static, procedural, or live browser environments by prefixing each episode with the task goal, ingesting structured interactive DOM element observations without artificial token truncation up to the sequence limit, and generating temperature-scaled actions alongside continuous Gaussian spatial coordinates.
+The system SHALL sample multi-turn interaction trajectories in static, procedural, or live browser environments by prefixing each episode with the task goal, ingesting structured interactive DOM element observations without artificial token truncation up to the sequence limit, executing macro-action input clearing and render settling, checking programmatic completion referees to eliminate infinite truncation, and generating temperature-scaled actions alongside continuous Gaussian spatial coordinates.
 
 #### Scenario: Temperature-based stochastic rollout execution
 - **WHEN** the rollout sampler executes an episode for an environment scenario with sampling temperature $T > 0$
@@ -24,6 +24,14 @@ The system SHALL sample multi-turn interaction trajectories in static, procedura
 #### Scenario: High-fidelity DOM observation ingestion
 - **WHEN** a web observation containing structured interactive elements is encoded
 - **THEN** the rollout sampler ingests up to the full observation sequence budget (at least 512 tokens) without arbitrarily truncating observations to 24 tokens
+
+#### Scenario: Referee-assisted task termination
+- **WHEN** the agent reaches the target goal state across any rollout turn
+- **THEN** the completion referee detects milestone completion, emits or validates the FINISH transition, terminates the rollout successfully, and awards the terminal completion reward instead of truncating at maximum steps
+
+#### Scenario: Macro-action input clearing and render settling
+- **WHEN** the agent dispatches a TYPE action or navigates to a new page
+- **THEN** the execution scaffold automatically clears pre-existing input text and polls until DOM mutations settle before capturing the next observation
 
 ### Requirement: Group Rollout Collection for GRPO
 The system SHALL collect groups of $G$ rollouts per task goal with joint token and continuous spatial coordinate log-probabilities for Group Relative Policy Optimization across diverse real-world web tasks.
@@ -100,7 +108,7 @@ The system SHALL evaluate agent exploration actions during real-world web rollou
 - **THEN** the reward function computes the 2D Gaussian proximity score relative to the ground-truth target bounding box center, penalizing off-target clicks
 
 ### Requirement: Dual-Modality GRPO Verification and Optimization
-The system SHALL compute joint policy gradient updates across both discrete token policy heads and continuous spatial Gaussian coordinate heads weighted by coordinate factor `lambda_coord`.
+The system SHALL compute joint policy gradient updates across both discrete token policy heads and continuous spatial Gaussian coordinate heads weighted by coordinate factor `lambda_coord`, optimizing with a decoupled hierarchical reward function rewarding candidate element hits, argument matches, and completion bonuses.
 
 #### Scenario: Dual-modality policy gradient update
 - **WHEN** a group of browser rollouts is evaluated by GRPOTrainer
@@ -109,6 +117,10 @@ The system SHALL compute joint policy gradient updates across both discrete toke
 #### Scenario: Group-normalized coordinate advantage weighting
 - **WHEN** coordinate log-probabilities are updated during GRPO
 - **THEN** relative advantages normalized across group $G$ scale the spatial coordinate gradients identically to token rationale gradients
+
+#### Scenario: Decoupled hierarchical reward computation
+- **WHEN** rollout rewards are collated for GRPO advantage computation
+- **THEN** rewards are computed using decoupled components: action primitive type match, candidate-snapped or continuous point-in-box element hit, textual argument alignment, and referee-verified terminal completion bonus
 
 ### Requirement: Offline Real-World DPO Pipeline Integration
 The system SHALL support Direct Policy Optimization directly from offline real-world web preference datasets without requiring synthetic procedural mock rollouts, serving as the required calibration phase prior to online browser GRPO.

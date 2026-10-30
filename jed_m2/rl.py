@@ -212,22 +212,29 @@ def compute_shaped_reward(
     turn_count: int = 1,
     iou_sum: float = 0.0,
     repeated_action_count: int = 0,
+    action_type_matches: int = 0,
+    argument_matches: int = 0,
     completion_bonus: float = 2.0,
     milestone_reward: float = 0.5,
-    iou_weight: float = 0.3,
-    step_penalty: float = 0.05,
+    iou_weight: float = 0.5,
+    action_type_weight: float = 0.2,
+    argument_weight: float = 0.3,
+    step_penalty: float = 0.02,
     looping_penalty: float = 0.5,
 ) -> float:
     """
-    Dense multi-factor reward shaping for digital LAM agents:
-    R = (+2.0 * completion) + (+0.5 * milestones) + (+0.3 * IoU) - (0.05 * steps) - (0.5 * loops)
+    Decoupled hierarchical reward formulation for digital LAM agents:
+    R = w_complete * R_complete + w_milestone * R_milestone + w_coord * R_coord
+        + w_type * R_type + w_arg * R_arg - step_penalty - looping_penalty
     """
     r_task = completion_bonus if goal_satisfied else 0.0
     r_milestone = milestone_reward * milestones_count
-    r_iou = iou_weight * max(0.0, min(1.0, iou_sum))
+    r_coord = iou_weight * max(0.0, min(5.0, iou_sum))
+    r_type = action_type_weight * max(0, action_type_matches)
+    r_arg = argument_weight * max(0, argument_matches)
     r_step = -step_penalty * max(0, turn_count)
     r_loop = -looping_penalty * max(0, repeated_action_count)
-    return round(r_task + r_milestone + r_iou + r_step + r_loop, 4)
+    return round(r_task + r_milestone + r_coord + r_type + r_arg + r_step + r_loop, 4)
 
 
 def compute_token_log_probs(

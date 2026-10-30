@@ -90,6 +90,23 @@ class TestRLRollout(unittest.TestCase):
         self.assertAlmostEqual(adv_mean, 0.0, places=4)
         print("PASS: test_real_task_rollout_sampling - Group advantages:", batch["advantages"].tolist())
 
+    def test_rollout_scaffold_referee_termination(self):
+        """Verifies that TrajectoryRolloutSampler uses ExecutionScaffold and CompletionReferee."""
+        from jed_m2.environment import WebOSEnvironment
+        env = WebOSEnvironment(scenario_id="ecommerce")
+
+        traj = self.sampler.sample_trajectory(
+            env=env,
+            temperature=0.0,
+            max_turns=3,
+        )
+
+        self.assertIsNotNone(traj)
+        self.assertGreater(len(traj.turns), 0)
+        self.assertTrue(hasattr(self.sampler, "scaffold"))
+        self.assertTrue(hasattr(self.sampler, "referee"))
+        print("PASS: test_rollout_scaffold_referee_termination - Trajectory num steps:", traj.num_steps)
+
 
 if __name__ == "__main__":
     unittest.main()

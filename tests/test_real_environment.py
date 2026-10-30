@@ -92,6 +92,34 @@ class TestRealEnvironment(unittest.TestCase):
         self.assertLess(rew_wrong, rew_perfect)
         print("PASS: test_oracle_rewards - Perfect reward:", rew_perfect, "| Wrong reward:", rew_wrong)
 
+    def test_environment_goal_criteria(self):
+        """Verifies referee-queryable goal criteria on WebOSEnvironment and RealTaskDOMEnvironment."""
+        from jed_m2.environment import WebOSEnvironment
+        webos = WebOSEnvironment(scenario_id="ecommerce")
+        webos.reset()
+        self.assertFalse(webos.check_goal_criteria())
+
+        # Step to results
+        submit_btn = [el for el in webos.current_state.elements if el.role == "submit_btn"][0]
+        webos.step(ActionType.CLICK, coordinates=submit_btn.center)
+        self.assertFalse(webos.check_goal_criteria())
+
+        # Step to details
+        item_card = [el for el in webos.current_state.elements if el.role in ("first_product_link", "item_card")][0]
+        webos.step(ActionType.CLICK, coordinates=item_card.center)
+        self.assertFalse(webos.check_goal_criteria())
+
+        # Step to checkout
+        checkout_btn = [el for el in webos.current_state.elements if el.role in ("checkout_btn", "proceed_checkout")][0]
+        res = webos.step(ActionType.CLICK, coordinates=checkout_btn.center)
+        self.assertTrue(webos.check_goal_criteria())
+        self.assertTrue(res.info["goal_criteria_met"])
+
+        # RealTaskDOMEnvironment check
+        self.env.reset(task_idx=0)
+        self.assertFalse(self.env.check_goal_criteria())
+        print("PASS: test_environment_goal_criteria - Verified goal criteria queries")
+
 
 if __name__ == "__main__":
     unittest.main()
