@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 
+from jed_m2.bpe_tokenizer import ActionBPETokenizer
 from jed_m2.config import JEDM2Config
 from jed_m2.core.features import compute_obs_features
 from jed_m2.dataset import SimpleLAMTokenizer
@@ -127,7 +128,7 @@ class JEDM2Agent:
         self,
         model: JEDM2Model,
         config: Optional[JEDM2Config] = None,
-        tokenizer: Optional[SimpleLAMTokenizer] = None,
+        tokenizer: Optional[ActionBPETokenizer] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.bfloat16,
         max_thought_tokens: int = 16,
@@ -139,7 +140,7 @@ class JEDM2Agent:
     ):
         self.model = model
         self.config = config if config is not None else getattr(model, "config", JEDM2Config())
-        self.tokenizer = tokenizer if tokenizer is not None else SimpleLAMTokenizer(self.config.vocab_size)
+        self.tokenizer = tokenizer if tokenizer is not None else ActionBPETokenizer(self.config.vocab_size)
 
         if device is None:
             # Infer device from model parameters
@@ -505,14 +506,17 @@ class JEDM2Agent:
                 cur_lm, cur_act = self._feed_single_token(next_tok_id)
             self._feed_single_token(arg_end_id)
 
-            raw_arg_str = self.tokenizer.decode(arg_tokens).strip()
-            arg_str = " ".join([w for w in raw_arg_str.split() if not w.startswith("<") and not w.endswith(">")])
+            if hasattr(self.tokenizer, "decode_argument"):
+                arg_str = self.tokenizer.decode_argument(arg_tokens)
+            else:
+                raw_arg_str = self.tokenizer.decode(arg_tokens).strip()
+                arg_str = " ".join([w for w in raw_arg_str.split() if not w.startswith("<") and not w.endswith(">")])
             if not arg_str:
                 arg_token_id = int(torch.argmax(action_output.argument_logits, dim=-1).item())
-                arg_str = self.tokenizer.decode([arg_token_id]).strip()
+                arg_str = self.tokenizer.decode([arg_token_id], skip_special_tokens=True).strip() if hasattr(self.tokenizer, "decode") else self.tokenizer.decode([arg_token_id]).strip()
         else:
             arg_token_id = int(torch.argmax(action_output.argument_logits, dim=-1).item())
-            arg_str = self.tokenizer.decode([arg_token_id]).strip()
+            arg_str = self.tokenizer.decode([arg_token_id], skip_special_tokens=True).strip() if hasattr(self.tokenizer, "decode") else self.tokenizer.decode([arg_token_id]).strip()
 
         # Clean rationale text
         thought_text = self.tokenizer.decode(thought_tokens).strip()

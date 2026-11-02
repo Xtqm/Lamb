@@ -35,6 +35,7 @@ from jed_m2.core.types import (
     RealWebInteractionTurn,
     UIElement,
 )
+from jed_m2.bpe_tokenizer import ActionBPETokenizer
 from jed_m2.dataset import SimpleLAMTokenizer, TrajectoryBatch
 from jed_m2.heads import ActionType
 
@@ -1429,11 +1430,11 @@ class RealTrajectoryCollator:
     def __init__(
         self,
         config: JEDM2Config,
-        tokenizer: Optional[SimpleLAMTokenizer] = None,
+        tokenizer: Optional[ActionBPETokenizer] = None,
         max_seq_len: Optional[int] = None,
     ):
         self.config = config
-        self.tokenizer = tokenizer or SimpleLAMTokenizer(config.vocab_size)
+        self.tokenizer = tokenizer or ActionBPETokenizer(config.vocab_size)
         self.max_seq_len = max_seq_len or config.max_seq_len
         self.hidden_dim = config.hidden_dim
 

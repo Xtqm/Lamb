@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 
+from jed_m2.bpe_tokenizer import ActionBPETokenizer
 from jed_m2.config import JEDM2Config
 from jed_m2.dataset import SimpleLAMTokenizer
 from jed_m2.environment import ScenarioDefinition, StepResult, WebOSEnvironment, get_default_scenarios
@@ -120,7 +121,7 @@ class TrajectoryRolloutSampler:
         self,
         model: JEDM2Model,
         config: Optional[JEDM2Config] = None,
-        tokenizer: Optional[SimpleLAMTokenizer] = None,
+        tokenizer: Optional[ActionBPETokenizer] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.bfloat16,
         max_thought_tokens: int = 16,
@@ -128,7 +129,7 @@ class TrajectoryRolloutSampler:
     ):
         self.model = model
         self.config = config if config is not None else getattr(model, "config", JEDM2Config())
-        self.tokenizer = tokenizer if tokenizer is not None else SimpleLAMTokenizer(self.config.vocab_size)
+        self.tokenizer = tokenizer if tokenizer is not None else ActionBPETokenizer(self.config.vocab_size)
 
         if device is None:
             try:
@@ -317,7 +318,7 @@ class TrajectoryRolloutSampler:
 
                 arg_probs = F.softmax(action_output.argument_logits / temperature, dim=-1)
                 arg_token_id = int(torch.multinomial(arg_probs, num_samples=1).item())
-                arg_str = self.tokenizer.decode([arg_token_id]).strip()
+                arg_str = self.tokenizer.decode([arg_token_id], skip_special_tokens=True).strip() if hasattr(self.tokenizer, "decode") else self.tokenizer.decode([arg_token_id]).strip()
             else:
                 action_type_id = int(torch.argmax(action_output.action_type_logits, dim=-1).item())
                 action_type = ActionType(action_type_id)
@@ -328,7 +329,7 @@ class TrajectoryRolloutSampler:
                 coord_logp = 0.0
 
                 arg_token_id = int(torch.argmax(action_output.argument_logits, dim=-1).item())
-                arg_str = self.tokenizer.decode([arg_token_id]).strip()
+                arg_str = self.tokenizer.decode([arg_token_id], skip_special_tokens=True).strip() if hasattr(self.tokenizer, "decode") else self.tokenizer.decode([arg_token_id]).strip()
 
             coords = (coord_x, coord_y)
             cand_list = None

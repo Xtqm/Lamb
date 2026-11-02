@@ -108,3 +108,26 @@ def test_decoupled_shaped_reward():
     )
     assert rew_progress > 0.0, "Decoupled reward must award positive return for correct sub-actions even before completion"
 
+
+def test_scaffold_resolve_argument_macro():
+    env = WebOSEnvironment(scenario_id="ecommerce")
+    env.reset()
+    scaffold = ExecutionScaffold()
+
+    # Case 1: Plain natural text string passed directly
+    res1 = scaffold._resolve_argument_macro(env, "Sony WH-1000XM5")
+    assert res1 == "Sony WH-1000XM5"
+
+    # Case 2: Delimited <arg> text </arg>
+    res2 = scaffold._resolve_argument_macro(env, "<arg> Bose QuietComfort </arg>")
+    assert res2 == "Bose QuietComfort"
+
+    # Case 3: Empty string falls back to goal regex
+    res3 = scaffold._resolve_argument_macro(env, "")
+    assert res3 == "noise-cancelling headphones"
+
+    # Case 4: Legacy tok_ placeholder falls back to goal regex
+    res4 = scaffold._resolve_argument_macro(env, "tok_3412 tok_981")
+    assert res4 == "noise-cancelling headphones"
+
+

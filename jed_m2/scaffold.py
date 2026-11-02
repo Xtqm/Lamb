@@ -104,12 +104,23 @@ class ExecutionScaffold:
 
     def _resolve_argument_macro(self, env: Any, argument: Optional[str]) -> str:
         """
-        Resolves the text argument for TYPE actions. If the model emitted a token ID
-        representation or special token, the macro extracts the domain-relevant query
-        from the goal instruction.
+        Resolves the text argument for TYPE actions.
+        Prioritizes the native decoded text argument produced by the model.
+        Strips surrounding <arg> / </arg> control delimiters if present.
+        Only falls back to heuristic goal extraction when the argument is empty
+        or consists solely of legacy un-decoded tokens (e.g. 'tok_...').
         """
         raw_arg = (argument or "").strip()
-        if raw_arg and not raw_arg.startswith("<") and not raw_arg.startswith("tok_"):
+        # Clean surrounding control tokens if present
+        if raw_arg.startswith("<arg>") and raw_arg.endswith("</arg>"):
+            raw_arg = raw_arg[5:-6].strip()
+        elif raw_arg.startswith("<arg>"):
+            raw_arg = raw_arg[5:].strip()
+        elif raw_arg.endswith("</arg>"):
+            raw_arg = raw_arg[:-6].strip()
+
+        # If a valid decoded string is present (not empty, not legacy tok_...), dispatch directly
+        if raw_arg and not raw_arg.startswith("tok_") and not (raw_arg.startswith("<") and raw_arg.endswith(">")):
             return raw_arg
 
         goal_text = getattr(env, "current_goal", "") or (

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 from torch.utils.data import Dataset
 
+from jed_m2.bpe_tokenizer import ActionBPETokenizer
 from jed_m2.config import JEDM2Config
 from jed_m2.core.features import compute_obs_features
 from jed_m2.core.types import InteractionTurn, UIElement
@@ -46,13 +47,13 @@ class TrajectorySample:
 
 
 # ==============================================================================
-# 2. Deterministic Pure-PyTorch Tokenizer
+# 2. Tokenizers: Invertible ActionBPETokenizer & LegacyHashTokenizer
 # ==============================================================================
 
-class SimpleLAMTokenizer:
+class LegacyHashTokenizer:
     """
-    Lightweight, deterministic tokenizer for JED-M2 Large Action Model.
-    Calibrated for vocab_size = 8192 without external dependencies.
+    Legacy lightweight, deterministic MD5 hash tokenizer for JED-M2.
+    Retained for backward compatibility with historical checkpoints.
     Reserves special tokens in [0..10] and hashes subwords/words into [11..vocab_size-1].
     """
 
@@ -112,6 +113,10 @@ class SimpleLAMTokenizer:
         return " ".join(words)
 
 
+# Primary tokenizer alias: SimpleLAMTokenizer now points to ActionBPETokenizer
+SimpleLAMTokenizer = ActionBPETokenizer
+
+
 # ==============================================================================
 # 3. Synthetic Trajectory Generator (WebArena / Mind2Web Scenarios)
 # ==============================================================================
@@ -168,10 +173,16 @@ class SyntheticTrajectoryGenerator:
         },
     ]
 
-    def __init__(self, config: JEDM2Config, seed: Optional[int] = None):
+    def __init__(
+        self,
+        config: JEDM2Config,
+        seed: Optional[int] = None,
+        tokenizer: Optional[ActionBPETokenizer] = None,
+    ):
         self.config = config
         self.hidden_dim = config.hidden_dim
         self.rng = random.Random(seed)
+        self.tokenizer = tokenizer or ActionBPETokenizer(config.vocab_size)
 
     def _generate_dom_tree(self, target_element_name: str, target_tag: str, target_role: str) -> Tuple[List[UIElement], UIElement]:
         """Generates 6 to 12 realistic UI elements with non-overlapping bounding boxes in [0, 1]."""
@@ -355,13 +366,15 @@ class AgentTrajectoryDataset(Dataset):
         virtual_size: int = 10000,
         seed: int = 42,
         max_turns: Optional[int] = None,
+        tokenizer: Optional[ActionBPETokenizer] = None,
     ):
         super().__init__()
         self.config = config
         self.virtual_size = virtual_size
         self.seed = seed
         self.max_turns = max_turns
-        self.generator = SyntheticTrajectoryGenerator(config, seed=seed)
+        self.tokenizer = tokenizer or ActionBPETokenizer(config.vocab_size)
+        self.generator = SyntheticTrajectoryGenerator(config, seed=seed, tokenizer=self.tokenizer)
 
     def __len__(self) -> int:
         return self.virtual_size
@@ -449,11 +462,11 @@ class TrajectoryCollator:
     def __init__(
         self,
         config: JEDM2Config,
-        tokenizer: Optional[SimpleLAMTokenizer] = None,
+        tokenizer: Optional[Union[ActionBPETokenizer, LegacyHashTokenizer]] = None,
         max_seq_len: Optional[int] = None,
     ):
         self.config = config
-        self.tokenizer = tokenizer or SimpleLAMTokenizer(config.vocab_size)
+        self.tokenizer = tokenizer or ActionBPETokenizer(config.vocab_size)
         self.max_seq_len = max_seq_len or config.max_seq_len
 
     def __call__(self, samples: List[TrajectorySample]) -> TrajectoryBatch:

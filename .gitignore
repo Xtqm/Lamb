@@ -52,6 +52,7 @@ Thumbs.db
 # Temporary planning and scratch docs
 FUTURE_PHASES_PROPOSALS.md
 *.tmp.md
+scratch/
 
 # Mind2Web & Real Web Trajectory Datasets and Caches (Phase 14)
 data/raw_mind2web/
