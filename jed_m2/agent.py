@@ -47,6 +47,7 @@ class AgentStepOutput:
     raw_coordinates: Tuple[float, float] = (0.0, 0.0)
     raw_action_output: Optional[ActionOutput] = None
     jepa_planning_scores: Optional[Dict[str, float]] = None
+    is_terminal: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Converts agent step output to dictionary."""
@@ -59,6 +60,7 @@ class AgentStepOutput:
             "thought": self.thought,
             "gate_prob": self.gate_prob,
             "num_thought_tokens": self.num_thought_tokens,
+            "is_terminal": self.is_terminal,
         }
         if self.jepa_planning_scores is not None:
             res["jepa_planning_scores"] = self.jepa_planning_scores
@@ -532,6 +534,7 @@ class JEDM2Agent:
         self._feed_token_sequence(close_tokens)
 
         self.turn_count += 1
+        is_terminal = (action_type == ActionType.FINISH)
 
         return AgentStepOutput(
             action_type=action_type,
@@ -545,6 +548,34 @@ class JEDM2Agent:
             raw_coordinates=raw_coords_tuple,
             raw_action_output=action_output,
             jepa_planning_scores=jepa_planning_scores,
+            is_terminal=is_terminal,
+        )
+
+    def step(
+        self,
+        obs_text: str,
+        obs_features: Optional[torch.Tensor] = None,
+        screenshot: Optional[Union[torch.Tensor, Any]] = None,
+        goal_embedding: Optional[torch.Tensor] = None,
+        candidate_elements: Optional[List[Any]] = None,
+        snap_coordinates: Optional[bool] = None,
+        max_snap_distance: Optional[float] = None,
+        use_jepa_planning: Optional[bool] = None,
+        jepa_planning_lambda: Optional[float] = None,
+    ) -> AgentStepOutput:
+        """
+        Step agent policy on a single observation. Alias for act().
+        """
+        return self.act(
+            obs_text=obs_text,
+            obs_features=obs_features,
+            screenshot=screenshot,
+            goal_embedding=goal_embedding,
+            candidate_elements=candidate_elements,
+            snap_coordinates=snap_coordinates,
+            max_snap_distance=max_snap_distance,
+            use_jepa_planning=use_jepa_planning,
+            jepa_planning_lambda=jepa_planning_lambda,
         )
 
     def step_environment(
@@ -567,8 +598,14 @@ class JEDM2Agent:
             if screenshot is None and isinstance(init_res.info, dict):
                 screenshot = init_res.info.get("screenshot", None)
         else:
-            obs_text = env._format_observation_text()
-            obs_features = env._generate_obs_features()
+            if hasattr(env, "_format_observation_text"):
+                obs_text = env._format_observation_text()
+            else:
+                obs_text = getattr(env.current_state, "last_action_str", "") or "Observation"
+            if hasattr(env, "_generate_obs_features"):
+                obs_features = env._generate_obs_features()
+            else:
+                obs_features = getattr(env.current_state, "obs_features", None)
             if hasattr(env, "capture_screenshot"):
                 screenshot = env.capture_screenshot(as_tensor=True)
 
@@ -593,6 +630,7 @@ class JEDM2Agent:
             argument=agent_output.argument,
         )
 
+        is_done = step_res.done or agent_output.is_terminal
         record = TurnRecord(
             turn_id=self.turn_count,
             obs_text=obs_text,
@@ -601,7 +639,7 @@ class JEDM2Agent:
             coordinates=agent_output.coordinates,
             argument=agent_output.argument,
             reward=step_res.reward,
-            done=step_res.done,
+            done=is_done,
             gate_prob=agent_output.gate_prob,
         )
         self.history.append(record)
@@ -622,7 +660,7 @@ class JEDM2Agent:
 
         for _ in range(max_turns):
             agent_out, step_res = self.step_environment(env)
-            if step_res.done:
+            if agent_out.is_terminal or step_res.done:
                 break
 
         return list(self.history)

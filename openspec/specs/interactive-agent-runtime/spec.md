@@ -31,6 +31,10 @@ The agent runtime SHALL execute a decoupled dual-system decision loop that gener
 - **WHEN** active JEPA planning is enabled and thought generation concludes
 - **THEN** the decision loop runs latent action rollouts to verify or re-rank candidate action primitives before dispatching the chosen action to the environment
 
+#### Scenario: Autonomous termination action commitment
+- **WHEN** System 1 emits an `ActionType.FINISH` primitive upon completing the task objective
+- **THEN** the agent runtime records the terminal turn, signals session completion, and yields execution without waiting for external scaffold or referee intervention
+
 ### Requirement: Observation Parsing and Action Dispatching
 The agent runtime SHALL parse environment DOM text, live accessibility trees, and observation vectors into token IDs and tensor embeddings, synchronize live screenshots with the visual patch encoder, and dispatch structured actions to both simulated and live browser environments.
 

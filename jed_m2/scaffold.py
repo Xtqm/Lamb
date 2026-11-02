@@ -149,16 +149,48 @@ class ExecutionScaffold:
 
 
 # ==============================================================================
-# 2. Programmatic Task Feasibility & Completion Referee
+# 2. Programmatic Task Feasibility & Completion Referee (Evaluation Oracle)
 # ==============================================================================
 
 class CompletionReferee:
     """
-    Deterministic task referee inspecting environment state to determine whether
-    goal requirements have been fulfilled.
-    Eliminates infinite-loop truncation by signaling task completion and enabling
-    clean episode termination with full terminal rewards.
+    Deterministic task referee and post-hoc evaluation oracle inspecting environment
+    state to verify whether ground-truth task goals and milestones have been fulfilled.
+
+    Decoupling Architecture:
+    During live autonomous agent rollouts (RL exploration, benchmark evaluation, sidecar execution),
+    the policy is responsible for detecting task completion and emitting ActionType.FINISH.
+    CompletionReferee functions strictly as an external oracle to:
+    1. Score post-hoc trajectory success (autonomous success vs referee-assisted milestone hit).
+    2. Guide offline preference dataset labeling and reward shaping.
+    3. Provide ground-truth milestone validation independent of policy output.
     """
+
+    @classmethod
+    def evaluate_autonomous_success(
+        cls,
+        env: Any,
+        final_action: Optional[Union[ActionType, int, str]],
+    ) -> Tuple[bool, bool]:
+        """
+        Evaluates whether an episode achieved autonomous success vs referee-assisted milestone hit.
+
+        Returns:
+            Tuple of (autonomous_success, referee_goal_satisfied)
+        """
+        referee_sat = cls.is_goal_satisfied(env)
+        if isinstance(final_action, int):
+            try:
+                final_action = ActionType(final_action)
+            except ValueError:
+                final_action = None
+        elif isinstance(final_action, str):
+            try:
+                final_action = ActionType[final_action.upper()]
+            except KeyError:
+                final_action = None
+        is_autonomous = bool(referee_sat and final_action == ActionType.FINISH)
+        return is_autonomous, referee_sat
 
     @staticmethod
     def is_goal_satisfied(env: Any) -> bool:

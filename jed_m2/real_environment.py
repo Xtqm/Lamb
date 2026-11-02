@@ -250,6 +250,19 @@ class RealTaskDOMEnvironment:
                 return True
         return False
 
+    def _format_observation_text(self) -> str:
+        """Serializes active state and visible elements into clean prompt observation."""
+        if self.active_task and self.current_turn_idx < len(self.active_task.turns):
+            current_turn = self.active_task.turns[self.current_turn_idx]
+            dom_str = " ".join([el.to_dom_string() for el in self.active_elements[:8]])
+            return f"Goal: {self.active_task.goal} | URL: {current_turn.url} | DOM: {dom_str}"
+        return ""
+
+    def _generate_obs_features(self) -> torch.Tensor:
+        """Generates dense observation embedding [hidden_dim]."""
+        obs_text = self._format_observation_text()
+        return compute_obs_features(obs_text, self.active_elements, self.hidden_dim)
+
     @property
     def active_scenario(self) -> Any:
         """Duck-typed scenario interface for compatibility with rollout samplers."""

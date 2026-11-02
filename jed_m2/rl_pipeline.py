@@ -371,17 +371,8 @@ class TrajectoryRolloutSampler:
                     if dist < 0.05:
                         repeated_count += 1
 
-            # Evaluate termination and goal status via CompletionReferee
-            referee_done, referee_goal_satisfied, term_reason = self.referee.evaluate_termination(
-                env=env,
-                current_step=turn_idx + 1,
-                max_steps=max_turns,
-                action_type=action_type,
-                repeated_action_count=repeated_count,
-            )
-            is_done = step_res.done or referee_done
-            if referee_goal_satisfied and hasattr(env, "goal_satisfied"):
-                env.goal_satisfied = True
+            # Autonomous agent termination: episode ends when agent emits FINISH, environment completes, or loop cutoff occurs
+            is_done = (action_type == ActionType.FINISH) or step_res.done or (repeated_count >= 3)
 
             # Action primitive token (trainable)
             act_tok = self.tokenizer.encode(action_type.name)[0]
@@ -491,7 +482,14 @@ class TrajectoryRolloutSampler:
         all_tokens.append(self.tokenizer.EOS_TOKEN_ID)
         all_mask.append(False)
 
-        is_success = bool(getattr(env, "goal_satisfied", False) or CompletionReferee.is_goal_satisfied(env))
+        # Post-hoc evaluation oracle: CompletionReferee assesses milestone achievement after episode conclusion
+        final_action = turns[-1].action_type if turns else None
+        goal_satisfied = bool(getattr(env, "goal_satisfied", False) or CompletionReferee.is_goal_satisfied(env))
+        if goal_satisfied and hasattr(env, "goal_satisfied"):
+            env.goal_satisfied = True
+
+        # Autonomous success requires both milestone satisfaction AND autonomous FINISH emission
+        is_success = bool(goal_satisfied and final_action == ActionType.FINISH)
         terminal_reward = 1.0 if is_success else 0.0
         cumulative_reward = float(env.current_state.cumulative_reward) if env.current_state else 0.0
 
@@ -738,6 +736,7 @@ class TrajectoryRolloutSampler:
                 type_matches = sum(1 for t in traj.turns if t.reward >= 0.1)
                 arg_matches = sum(1 for t in traj.turns if t.argument and t.reward > 0.0)
                 iou_estimate = sum(0.2 for t in traj.turns if t.reward >= 0.2)
+                terminal_act = traj.turns[-1].action_type if traj.turns else None
                 shaped_r = compute_shaped_reward(
                     goal_satisfied=traj.success,
                     milestones_count=milestone_count,
@@ -746,6 +745,7 @@ class TrajectoryRolloutSampler:
                     repeated_action_count=repeated_count,
                     action_type_matches=type_matches,
                     argument_matches=arg_matches,
+                    terminal_action=terminal_act,
                 )
                 raw_rewards.append(shaped_r)
             elif reward_mode == "terminal":

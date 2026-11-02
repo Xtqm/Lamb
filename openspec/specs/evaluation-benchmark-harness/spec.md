@@ -16,6 +16,10 @@ The system SHALL compute formal action and trajectory evaluation metrics across 
 - **WHEN** metrics are computed across any number of evaluated episodes
 - **THEN** all computed metric values are valid floating-point numbers containing zero NaNs and zero Infs.
 
+#### Scenario: Native termination metric breakdown
+- **WHEN** benchmark evaluation completes for a policy checkpoint
+- **THEN** the metric summary explicitly reports Native FINISH Precision, Recall, and F1 score, separating autonomous unassisted success from referee-assisted completion
+
 ### Requirement: Offline Dataset Replay Evaluation
 The system SHALL support offline evaluation by replaying trajectory datasets, specifically including official held-out Mind2Web test splits across real-world domains and synthetic traces, against ground-truth element bounding boxes, continuous coordinates, and discrete action primitives.
 
@@ -41,6 +45,10 @@ The system SHALL support online closed-loop multi-turn agent evaluation across i
 #### Scenario: Closed-loop live Playwright evaluation
 - **WHEN** evaluating a model checkpoint on live Playwright browser tasks
 - **THEN** the agent navigates real web pages, captures screenshots and DOM snapshots, dispatches browser primitives, and records task completion metrics.
+
+#### Scenario: Unassisted closed-loop evaluation protocol
+- **WHEN** evaluating under the standard unassisted benchmark protocol
+- **THEN** execution proceeds without in-the-loop completion referee overrides, terminating exclusively on agent-emitted FINISH or maximum step timeout
 
 ### Requirement: Comparative Checkpoint Benchmarking and Reporting
 The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) supporting configurable model scaling tiers (`--model_size {nano,medium}`), evaluating multiple model checkpoints side-by-side (including Step 15,800 SFT and final online GRPO-trained checkpoints), rendering clean ASCII terminal comparison tables, and exporting formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).

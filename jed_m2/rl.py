@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from jed_m2.config import JEDM2Config
+from jed_m2.heads import ActionType
 from jed_m2.model import JEDM2Model, JEDM2Output
 
 
@@ -214,7 +215,10 @@ def compute_shaped_reward(
     repeated_action_count: int = 0,
     action_type_matches: int = 0,
     argument_matches: int = 0,
-    completion_bonus: float = 2.0,
+    terminal_action: Optional[Union[ActionType, int, str]] = None,
+    completion_bonus: float = 2.5,
+    premature_finish_penalty: float = 1.5,
+    timeout_penalty: float = 0.5,
     milestone_reward: float = 0.5,
     iou_weight: float = 0.5,
     action_type_weight: float = 0.2,
@@ -223,11 +227,33 @@ def compute_shaped_reward(
     looping_penalty: float = 0.5,
 ) -> float:
     """
-    Decoupled hierarchical reward formulation for digital LAM agents:
-    R = w_complete * R_complete + w_milestone * R_milestone + w_coord * R_coord
+    Decoupled hierarchical reward formulation for digital LAM agents with terminal calibration:
+    R = R_terminal + w_milestone * R_milestone + w_coord * R_coord
         + w_type * R_type + w_arg * R_arg - step_penalty - looping_penalty
+
+    Terminal reward calibration:
+    - Valid FINISH on satisfied state: +completion_bonus (+2.5)
+    - Premature FINISH on incomplete state: -premature_finish_penalty (-1.5)
+    - Timeout / non-FINISH truncation: -timeout_penalty (-0.5)
+    - None (legacy unconstrained): completion_bonus if goal_satisfied else 0.0
     """
-    r_task = completion_bonus if goal_satisfied else 0.0
+    if terminal_action is not None:
+        if isinstance(terminal_action, ActionType):
+            term_enum = terminal_action
+        elif isinstance(terminal_action, int):
+            term_enum = ActionType(terminal_action)
+        elif isinstance(terminal_action, str):
+            term_enum = ActionType[terminal_action.upper()]
+        else:
+            term_enum = None
+
+        if term_enum == ActionType.FINISH:
+            r_task = completion_bonus if goal_satisfied else -premature_finish_penalty
+        else:
+            r_task = -timeout_penalty
+    else:
+        r_task = completion_bonus if goal_satisfied else 0.0
+
     r_milestone = milestone_reward * milestones_count
     r_coord = iou_weight * max(0.0, min(5.0, iou_sum))
     r_type = action_type_weight * max(0, action_type_matches)

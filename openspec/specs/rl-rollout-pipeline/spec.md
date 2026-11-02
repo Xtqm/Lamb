@@ -7,7 +7,7 @@ Enables closed-loop reinforcement learning and preference optimization for JED-M
 ## Requirements
 
 ### Requirement: Stochastic Interactive Trajectory Sampling
-The system SHALL sample multi-turn interaction trajectories in static, procedural, or live browser environments by prefixing each episode with the task goal, ingesting structured interactive DOM element observations without artificial token truncation up to the sequence limit, executing macro-action input clearing and render settling, checking programmatic completion referees to eliminate infinite truncation, and generating temperature-scaled actions alongside continuous Gaussian spatial coordinates.
+The system SHALL sample multi-turn interaction trajectories in simulated or live browser environments by prefixing each episode with the task goal, ingesting structured interactive DOM observations up to the sequence limit, executing macro-action input clearing and render settling, generating temperature-scaled actions with continuous Gaussian coordinates, and terminating episodes autonomously when the agent emits FINISH or exhausts the maximum step budget.
 
 #### Scenario: Temperature-based stochastic rollout execution
 - **WHEN** the rollout sampler executes an episode for an environment scenario with sampling temperature $T > 0$
@@ -26,8 +26,12 @@ The system SHALL sample multi-turn interaction trajectories in static, procedura
 - **THEN** the rollout sampler ingests up to the full observation sequence budget (at least 512 tokens) without arbitrarily truncating observations to 24 tokens
 
 #### Scenario: Referee-assisted task termination
-- **WHEN** the agent reaches the target goal state across any rollout turn
-- **THEN** the completion referee detects milestone completion, emits or validates the FINISH transition, terminates the rollout successfully, and awards the terminal completion reward instead of truncating at maximum steps
+- **WHEN** the agent reaches the target goal state or terminates an episode
+- **THEN** the completion referee acts as a post-hoc evaluation oracle to validate milestone achievement and award terminal completion rewards without overriding in-the-loop actions
+
+#### Scenario: Autonomous agent task termination
+- **WHEN** the agent predicts an `ActionType.FINISH` primitive or reaches the maximum step budget
+- **THEN** the rollout episode terminates, and an external oracle scores whether the goal was satisfied to compute post-hoc terminal rewards or premature finish penalties without intervening in the live decision loop
 
 #### Scenario: Macro-action input clearing and render settling
 - **WHEN** the agent dispatches a TYPE action or navigates to a new page
@@ -120,7 +124,7 @@ The system SHALL compute joint policy gradient updates across both discrete toke
 
 #### Scenario: Decoupled hierarchical reward computation
 - **WHEN** rollout rewards are collated for GRPO advantage computation
-- **THEN** rewards are computed using decoupled components: action primitive type match, candidate-snapped or continuous point-in-box element hit, textual argument alignment, and referee-verified terminal completion bonus
+- **THEN** rewards are computed using decoupled components: action primitive type match, candidate-snapped or continuous point-in-box element hit, textual argument alignment, a positive terminal bonus for valid autonomous FINISH actions, and a negative penalty for premature FINISH emissions on unsatisfied states
 
 ### Requirement: Offline Real-World DPO Pipeline Integration
 The system SHALL support Direct Policy Optimization directly from offline real-world web preference datasets without requiring synthetic procedural mock rollouts, serving as the required calibration phase prior to online browser GRPO.

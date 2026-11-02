@@ -103,6 +103,9 @@ class EpisodeMetric:
     token_throughput: float
     total_reward: float
     step_metrics: List[StepMetric] = field(default_factory=list)
+    autonomous_success: bool = False
+    referee_assisted: bool = False
+    final_action: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes episode metric to dictionary."""
@@ -111,6 +114,9 @@ class EpisodeMetric:
             "benchmark_name": self.benchmark_name,
             "task_goal": self.task_goal,
             "task_success": self.task_success,
+            "autonomous_success": self.autonomous_success,
+            "referee_assisted": self.referee_assisted,
+            "final_action": self.final_action,
             "step_success_rate": self.step_success_rate,
             "action_accuracy": self.action_accuracy,
             "mean_coord_mae": self.mean_coord_mae,
@@ -131,7 +137,7 @@ class BenchmarkSummary:
 
     benchmark_name: str
     num_episodes: int
-    task_success_rate: float  # Percentage [0.0, 100.0]
+    task_success_rate: float  # Percentage [0.0, 100.0] (Autonomous Success Rate)
     mean_step_success_rate: float  # [0.0, 1.0]
     action_accuracy: float  # [0.0, 1.0]
     action_macro_f1: float  # [0.0, 1.0]
@@ -139,6 +145,11 @@ class BenchmarkSummary:
     action_per_class_f1: Dict[str, float] = field(default_factory=dict)
     action_per_class_precision: Dict[str, float] = field(default_factory=dict)
     action_per_class_recall: Dict[str, float] = field(default_factory=dict)
+    autonomous_success_rate: float = 0.0  # Percentage [0.0, 100.0]
+    referee_assisted_rate: float = 0.0  # Percentage [0.0, 100.0]
+    native_finish_f1: float = 0.0
+    native_finish_precision: float = 0.0
+    native_finish_recall: float = 0.0
     mean_coord_mae: float = 0.0
     coord_tolerance_accuracy: float = 0.0  # [0.0, 1.0]
     mean_efficiency_ratio: float = 0.0  # [0.0, 1.0]
@@ -158,11 +169,18 @@ class BenchmarkSummary:
             "checkpoint_name": self.checkpoint_name,
             "num_episodes": self.num_episodes,
             "task_success_rate": self.task_success_rate,
+            "autonomous_success_rate": self.autonomous_success_rate,
+            "referee_assisted_rate": self.referee_assisted_rate,
+            "native_finish_f1": self.native_finish_f1,
+            "native_finish_precision": self.native_finish_precision,
+            "native_finish_recall": self.native_finish_recall,
             "mean_step_success_rate": self.mean_step_success_rate,
             "action_accuracy": self.action_accuracy,
             "action_macro_f1": self.action_macro_f1,
             "action_micro_f1": self.action_micro_f1,
             "action_per_class_f1": self.action_per_class_f1,
+            "action_per_class_precision": self.action_per_class_precision,
+            "action_per_class_recall": self.action_per_class_recall,
             "mean_coord_mae": self.mean_coord_mae,
             "coord_tolerance_accuracy": self.coord_tolerance_accuracy,
             "mean_efficiency_ratio": self.mean_efficiency_ratio,
@@ -278,6 +296,9 @@ class TaskEvaluator:
         step_metrics: List[StepMetric],
         task_success: bool,
         optimal_length: int,
+        autonomous_success: Optional[bool] = None,
+        referee_assisted: Optional[bool] = None,
+        final_action: Optional[str] = None,
     ) -> EpisodeMetric:
         """
         Aggregates step metrics into an episode-level metric record.
@@ -289,10 +310,19 @@ class TaskEvaluator:
             step_metrics: Ordered list of StepMetric records.
             task_success: Whether the final task goal was completed.
             optimal_length: Length of optimal demonstration trajectory.
+            autonomous_success: Optional strict autonomous completion flag.
+            referee_assisted: Optional milestone satisfaction flag.
+            final_action: Optional name of the final executed action primitive.
 
         Returns:
             EpisodeMetric instance.
         """
+        auto_success = task_success if autonomous_success is None else autonomous_success
+        ref_assisted = task_success if referee_assisted is None else referee_assisted
+        last_action = final_action if final_action is not None else (
+            step_metrics[-1].action_name_pred if step_metrics else ""
+        )
+
         num_steps = len(step_metrics)
         if num_steps == 0:
             return EpisodeMetric(
@@ -311,6 +341,9 @@ class TaskEvaluator:
                 token_throughput=0.0,
                 total_reward=0.0,
                 step_metrics=[],
+                autonomous_success=auto_success,
+                referee_assisted=ref_assisted,
+                final_action=last_action,
             )
 
         step_success_count = sum(1 for sm in step_metrics if sm.subgoal_achieved or sm.action_correct)
@@ -354,6 +387,9 @@ class TaskEvaluator:
             token_throughput=token_throughput,
             total_reward=total_reward,
             step_metrics=step_metrics,
+            autonomous_success=auto_success,
+            referee_assisted=ref_assisted,
+            final_action=last_action,
         )
 
     def compute_action_f1(
@@ -472,8 +508,13 @@ class TaskEvaluator:
             )
 
         # Task Success Rate % in [0.0, 100.0]
-        success_count = sum(1 for ep in episodes if ep.task_success)
-        task_success_rate = float(success_count / num_episodes) * 100.0
+        auto_success_count = sum(1 for ep in episodes if getattr(ep, "autonomous_success", ep.task_success))
+        autonomous_success_rate = float(auto_success_count / num_episodes) * 100.0
+
+        referee_count = sum(1 for ep in episodes if getattr(ep, "referee_assisted", ep.task_success))
+        referee_assisted_rate = float(referee_count / num_episodes) * 100.0
+
+        task_success_rate = autonomous_success_rate
 
         mean_step_success_rate = float(sum(ep.step_success_rate for ep in episodes) / num_episodes)
         action_accuracy = float(sum(ep.action_accuracy for ep in episodes) / num_episodes)
@@ -509,10 +550,19 @@ class TaskEvaluator:
 
         macro_f1, micro_f1, per_class_f1, per_class_prec, per_class_rec = self.compute_action_f1(all_pred, all_gt)
 
+        finish_f1 = float(per_class_f1.get("FINISH", 0.0))
+        finish_prec = float(per_class_prec.get("FINISH", 0.0))
+        finish_rec = float(per_class_rec.get("FINISH", 0.0))
+
         return BenchmarkSummary(
             benchmark_name=benchmark_name,
             num_episodes=num_episodes,
             task_success_rate=task_success_rate,
+            autonomous_success_rate=autonomous_success_rate,
+            referee_assisted_rate=referee_assisted_rate,
+            native_finish_f1=finish_f1,
+            native_finish_precision=finish_prec,
+            native_finish_recall=finish_rec,
             mean_step_success_rate=mean_step_success_rate,
             action_accuracy=action_accuracy,
             action_macro_f1=macro_f1,
@@ -546,36 +596,36 @@ class TaskEvaluator:
             summaries = [summaries]
 
         lines: List[str] = []
-        border = "+" + "-" * 78 + "+"
+        border = "+" + "-" * 92 + "+"
         lines.append(border)
-        lines.append(f"| {title.center(76)} |")
+        lines.append(f"| {title.center(90)} |")
         lines.append(border)
 
         headers = [
             "Checkpoint / Model",
-            "SR (%)",
+            "ASR (%)",
+            "RAR (%)",
             "Step SR",
+            "Fin F1",
             "Act F1",
             "MAE",
-            "Tol Acc",
-            "Eff Ratio",
             "Lat (ms)",
         ]
-        col_fmt = "| {0:<24} | {1:>6} | {2:>7} | {3:>6} | {4:>6} | {5:>7} | {6:>9} | {7:>8} |"
+        col_fmt = "| {0:<22} | {1:>7} | {2:>7} | {3:>7} | {4:>6} | {5:>6} | {6:>6} | {7:>8} |"
         lines.append(col_fmt.format(*headers))
-        lines.append("+" + "=" * 78 + "+")
+        lines.append("+" + "=" * 92 + "+")
 
         for s in summaries:
-            name = s.checkpoint_name[:24]
-            sr_str = f"{s.task_success_rate:.1f}%"
+            name = s.checkpoint_name[:22]
+            asr_str = f"{s.autonomous_success_rate:.1f}%"
+            rar_str = f"{s.referee_assisted_rate:.1f}%"
             step_sr_str = f"{s.mean_step_success_rate:.3f}"
+            fin_f1_str = f"{s.native_finish_f1:.3f}"
             act_f1_str = f"{s.action_macro_f1:.3f}"
             mae_str = f"{s.mean_coord_mae:.3f}"
-            tol_str = f"{s.coord_tolerance_accuracy:.3f}"
-            eff_str = f"{s.mean_efficiency_ratio:.3f}"
             lat_str = f"{s.mean_decision_latency_ms:.1f}"
 
-            lines.append(col_fmt.format(name, sr_str, step_sr_str, act_f1_str, mae_str, tol_str, eff_str, lat_str))
+            lines.append(col_fmt.format(name, asr_str, rar_str, step_sr_str, fin_f1_str, act_f1_str, mae_str, lat_str))
 
         lines.append(border)
         return "\n".join(lines)
@@ -613,18 +663,19 @@ class TaskEvaluator:
 
         md_lines.append("## 1. Comparative Performance Summary\n")
         md_lines.append(
-            "| Checkpoint | Episodes | Task SR (%) | Step SR | Macro F1 | Micro F1 | Coord MAE | Coord Tol Acc (eps<=0.05) | Efficiency Ratio | Latency (ms/step) | Throughput (tok/s) | Peak VRAM (MB) |"
+            "| Checkpoint | Episodes | Autonomous SR (%) | Referee-Assisted SR (%) | Step SR | Native FINISH F1 | Macro F1 | Micro F1 | Coord MAE | Coord Tol Acc (eps<=0.05) | Efficiency Ratio | Latency (ms/step) | Peak VRAM (MB) |"
         )
         md_lines.append(
-            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
         )
 
         for s in summaries:
             row = (
-                f"| **{s.checkpoint_name}** | {s.num_episodes} | {s.task_success_rate:.2f}% | "
-                f"{s.mean_step_success_rate:.4f} | {s.action_macro_f1:.4f} | {s.action_micro_f1:.4f} | "
-                f"{s.mean_coord_mae:.4f} | {s.coord_tolerance_accuracy:.4f} | {s.mean_efficiency_ratio:.4f} | "
-                f"{s.mean_decision_latency_ms:.2f} ms | {s.mean_token_throughput:.1f} | {s.peak_vram_mb:.1f} MB |"
+                f"| **{s.checkpoint_name}** | {s.num_episodes} | {s.autonomous_success_rate:.2f}% | "
+                f"{s.referee_assisted_rate:.2f}% | {s.mean_step_success_rate:.4f} | {s.native_finish_f1:.4f} | "
+                f"{s.action_macro_f1:.4f} | {s.action_micro_f1:.4f} | {s.mean_coord_mae:.4f} | "
+                f"{s.coord_tolerance_accuracy:.4f} | {s.mean_efficiency_ratio:.4f} | "
+                f"{s.mean_decision_latency_ms:.2f} ms | {s.peak_vram_mb:.1f} MB |"
             )
             md_lines.append(row)
 
@@ -644,13 +695,15 @@ class TaskEvaluator:
 
         md_lines.append("\n---\n")
         md_lines.append("## 3. Metric Definitions & Formulas\n")
-        md_lines.append("1. **Task Success Rate (SR %)**: Exact task goal completion ($SR = \\frac{1}{N}\\sum_{i=1}^N \\mathbb{I}(\\text{success}_i) \\times 100$).")
-        md_lines.append("2. **Step Success Rate**: Ratio of valid intermediate sub-goals achieved across all execution turns.")
-        md_lines.append("3. **Action Primitive Macro F1**: Unweighted harmonic mean of precision and recall across discrete tools.")
-        md_lines.append("4. **Spatial Coordinate MAE**: Mean absolute error $\\frac{1}{2}(|\\hat{x} - x^*| + |\\hat{y} - y^*|)$ in normalized $[0, 1]^2$.")
-        md_lines.append("5. **Coordinate Tolerance Accuracy**: Fraction of actions with Euclidean distance $\\le 0.05$ or falling within element bbox.")
-        md_lines.append("6. **Trajectory Efficiency Ratio**: Ratio of optimal demonstration steps to agent steps ($L_{\\text{optimal}} / L_{\\text{agent}}$).")
-        md_lines.append("7. **Decision Latency**: Average milliseconds elapsed per decision step including rationale and action emission.")
+        md_lines.append("1. **Autonomous Success Rate (ASR %)**: Exact task goal completion requiring autonomous `ActionType.FINISH` emission ($ASR = \\frac{1}{N}\\sum_{i=1}^N \\mathbb{I}(\\text{goal\\_satisfied}_i \\land \\text{action}_i == \\text{FINISH}) \\times 100$).")
+        md_lines.append("2. **Referee-Assisted Rate (RAR %)**: Milestone satisfaction verified by completion referee regardless of terminal action emission.")
+        md_lines.append("3. **Native FINISH F1**: Harmonic mean of precision and recall for `ActionType.FINISH` primitives.")
+        md_lines.append("4. **Step Success Rate**: Ratio of valid intermediate sub-goals achieved across all execution turns.")
+        md_lines.append("5. **Action Primitive Macro F1**: Unweighted harmonic mean of precision and recall across discrete tools.")
+        md_lines.append("6. **Spatial Coordinate MAE**: Mean absolute error $\\frac{1}{2}(|\\hat{x} - x^*| + |\\hat{y} - y^*|)$ in normalized $[0, 1]^2$.")
+        md_lines.append("7. **Coordinate Tolerance Accuracy**: Fraction of actions with Euclidean distance $\\le 0.05$ or falling within element bbox.")
+        md_lines.append("8. **Trajectory Efficiency Ratio**: Ratio of optimal demonstration steps to agent steps ($L_{\\text{optimal}} / L_{\\text{agent}}$).")
+        md_lines.append("9. **Decision Latency**: Average milliseconds elapsed per decision step including rationale and action emission.")
 
         content = "\n".join(md_lines)
         if output_path:
@@ -761,18 +814,25 @@ def evaluate_offline_dataset(
             step_metrics.append(sm)
 
         # In offline replay, task succeeds if all steps were valid or finished with FINISH
-        if step_metrics and step_metrics[-1].action_type_gt == ActionType.FINISH.value:
-            task_success = (step_metrics[-1].action_correct and episode_success)
+        last_action_name = step_metrics[-1].action_name_pred if step_metrics else ""
+        has_finish_gt = bool(step_metrics and step_metrics[-1].action_type_gt == ActionType.FINISH.value)
+        if has_finish_gt:
+            replay_success = (step_metrics[-1].action_correct and episode_success)
+            auto_success = bool(replay_success and step_metrics[-1].action_type_pred == ActionType.FINISH.value)
         else:
-            task_success = episode_success and len(step_metrics) > 0
+            replay_success = episode_success and len(step_metrics) > 0
+            auto_success = replay_success
 
         ep_metric = evaluator.evaluate_episode(
             episode_id=sample.sample_id,
             benchmark_name=benchmark_name,
             task_goal=sample.goal,
             step_metrics=step_metrics,
-            task_success=task_success,
+            task_success=auto_success,
             optimal_length=sample.length,
+            autonomous_success=auto_success,
+            referee_assisted=replay_success,
+            final_action=last_action_name,
         )
         episode_metrics.append(ep_metric)
 
@@ -826,6 +886,8 @@ def evaluate_online_environment(
     if scenarios is None:
         default_dict = get_default_scenarios()
         scenarios = list(default_dict.values())
+    elif isinstance(scenarios, dict):
+        scenarios = list(scenarios.values())
 
     device_str = str(agent.device)
     if "cuda" in device_str and torch.cuda.is_available():
@@ -902,14 +964,8 @@ def evaluate_online_environment(
                     if dist < 0.05:
                         repeated_count += 1
 
-            # Evaluate termination and goal criteria via referee
-            ref_done, ref_goal_sat, term_reason = referee.evaluate_termination(
-                env=env,
-                current_step=turn_idx + 1,
-                max_steps=max_steps,
-                action_type=agent_out.action_type,
-                repeated_action_count=repeated_count,
-            )
+            # Autonomous termination check: agent emitted FINISH, environment completed, or repeated action loop cutoff
+            is_done = (agent_out.action_type == ActionType.FINISH) or step_res.done or (repeated_count >= 3)
 
             # In online simulation, step success is reflected by reward or last action success
             subgoal_achieved = (step_res.reward > 0.0 or step_res.info.get("action_success", False))
@@ -945,8 +1001,7 @@ def evaluate_online_environment(
             )
             step_metrics.append(sm)
 
-            if step_res.done or ref_done:
-                task_success = ref_goal_sat or getattr(env, "goal_satisfied", False)
+            if is_done:
                 break
 
             # Update observation for next step
@@ -957,10 +1012,13 @@ def evaluate_online_environment(
             else:
                 screenshot = None
 
-        if not task_success:
-            task_success = getattr(env, "goal_satisfied", False) or (
-                sum(sm.reward for sm in step_metrics) >= 1.0 or (step_metrics and step_metrics[-1].subgoal_achieved and agent_out.action_type == ActionType.FINISH)
-            )
+        # Post-hoc evaluation via CompletionReferee
+        ref_goal_sat = bool(getattr(env, "goal_satisfied", False) or CompletionReferee.is_goal_satisfied(env))
+        final_action = agent_out.action_type if 'agent_out' in locals() else None
+        final_action_name = final_action.name if final_action is not None else ""
+        auto_success = bool(ref_goal_sat and final_action == ActionType.FINISH)
+        ref_assisted = ref_goal_sat
+        task_success = auto_success
 
         ep_metric = evaluator.evaluate_episode(
             episode_id=f"{scenario.scenario_id}_ep{ep_idx}",
@@ -969,6 +1027,9 @@ def evaluate_online_environment(
             step_metrics=step_metrics,
             task_success=task_success,
             optimal_length=optimal_length,
+            autonomous_success=auto_success,
+            referee_assisted=ref_assisted,
+            final_action=final_action_name,
         )
         episode_metrics.append(ep_metric)
 
