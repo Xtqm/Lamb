@@ -1,19 +1,21 @@
 # JED-M2 Large Action Model - Benchmark Evaluation Report
 
-**Generated:** 2026-11-02 19:10:01 UTC  
+**Generated:** 2026-11-03 17:07:26 UTC  
 **Benchmark Domain:** `real_web_test`  
 **Evaluation Device:** `cuda`  
 
 ---
 
 ### Context & Notes
-Evaluated on 10 episodes with max_steps=5 and spatial tolerance epsilon=0.05 on device=cuda.
+Evaluated on 11 episodes with max_steps=5 and spatial tolerance epsilon=0.05 on device=cuda.
 
 ## 1. Comparative Performance Summary
 
 | Checkpoint | Split | Episodes | Autonomous SR (%) | Referee-Assisted SR (%) | Step SR | Native FINISH F1 | Macro F1 | Micro F1 | Coord MAE | Coord Tol Acc (eps<=0.05) | Efficiency Ratio | Latency (ms/step) | Peak VRAM (MB) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **jed_m2_sft_base** | `test` | 10 | 0.00% | 0.00% | 0.0000 | 1.0000 | 0.5714 | 0.0000 | 0.4190 | 0.0000 | 0.0000 | 25708.57 ms | 155.2 MB |
+| **jed_m2_sft_base** | `test` | 11 | 0.00% | 0.00% | 0.0000 | 1.0000 | 0.5714 | 0.0000 | 0.4244 | 0.0000 | 0.0000 | 22007.04 ms | 155.2 MB |
+| **T5-Small (~60.5M)** | `test` | 11 | 0.00% | 0.00% | 0.7545 | 1.0000 | 0.8385 | 0.7692 | 0.2423 | 0.3091 | 0.0000 | 367.77 ms | 295.8 MB |
+| **DistilGPT-2 (~81.9M)** | `test` | 11 | 0.00% | 0.00% | 0.8273 | 1.0000 | 0.8452 | 0.8462 | 0.2517 | 0.2727 | 0.0000 | 201.68 ms | 402.6 MB |
 
 ---
 
@@ -22,8 +24,14 @@ Evaluated on 10 episodes with max_steps=5 and spatial tolerance epsilon=0.05 on 
 | Checkpoint | Split / Category | Episodes | Autonomous SR (%) | Referee-Assisted SR (%) | Step SR | Action Accuracy | Coord MAE |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **jed_m2_sft_base** | `Travel` | 5 | 0.00% | 0.00% | 0.0000 | 0.0000 | 0.4264 |
-| **jed_m2_sft_base** | `Shopping` | 3 | 0.00% | 0.00% | 0.0000 | 0.0000 | 0.4442 |
+| **jed_m2_sft_base** | `Shopping` | 4 | 0.00% | 0.00% | 0.0000 | 0.0000 | 0.4528 |
 | **jed_m2_sft_base** | `Entertainment` | 2 | 0.00% | 0.00% | 0.0000 | 0.0000 | 0.3628 |
+| **T5-Small (~60.5M)** | `Travel` | 5 | 0.00% | 0.00% | 0.7800 | 0.7800 | 0.1679 |
+| **T5-Small (~60.5M)** | `Shopping` | 4 | 0.00% | 0.00% | 0.8500 | 0.8500 | 0.2611 |
+| **T5-Small (~60.5M)** | `Entertainment` | 2 | 0.00% | 0.00% | 0.5000 | 0.5000 | 0.3907 |
+| **DistilGPT-2 (~81.9M)** | `Travel` | 5 | 0.00% | 0.00% | 0.7400 | 0.7400 | 0.1445 |
+| **DistilGPT-2 (~81.9M)** | `Shopping` | 4 | 0.00% | 0.00% | 0.8500 | 0.8500 | 0.3387 |
+| **DistilGPT-2 (~81.9M)** | `Entertainment` | 2 | 0.00% | 0.00% | 1.0000 | 1.0000 | 0.3458 |
 
 ---
 
@@ -32,6 +40,8 @@ Evaluated on 10 episodes with max_steps=5 and spatial tolerance epsilon=0.05 on 
 | Checkpoint | CLICK | TYPE | SCROLL | NAVIGATE | API_CALL | FINISH |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **jed_m2_sft_base** | 0.000 | 0.000 | 0.000 | 1.000 | 1.000 | 1.000 |
+| **T5-Small (~60.5M)** | 0.870 | 0.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| **DistilGPT-2 (~81.9M)** | 0.917 | 0.000 | 1.000 | 1.000 | 1.000 | 1.000 |
 
 ---
 

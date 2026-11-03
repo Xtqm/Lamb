@@ -43,6 +43,11 @@ from jed_m2.dataset import (
 from jed_m2.environment import ScenarioDefinition, WebOSEnvironment, get_default_scenarios
 from jed_m2.model import JEDM2Model
 from jed_m2.real_dataset import RealWebTrajectoryDataset
+from jed_m2.small_lm_baselines import (
+    DistilGPT2ActionAgent,
+    SmallLMAgentWrapper,
+    T5SmallActionAgent,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +74,14 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         help="List of checkpoint paths to evaluate side-by-side (e.g. SFT Base vs GRPO Step 40).",
+    )
+    parser.add_argument(
+        "--baselines",
+        type=str,
+        nargs="+",
+        default=[],
+        choices=["t5_small", "distilgpt2"],
+        help="Pretrained baseline Small-LMs to evaluate side-by-side: t5_small, distilgpt2.",
     )
     parser.add_argument(
         "--split",
@@ -160,17 +173,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def is_t5_baseline(checkpoint_path: Optional[str]) -> bool:
+    if not checkpoint_path:
+        return False
+    cp_lower = checkpoint_path.lower()
+    if cp_lower in ("t5_small", "t5-small"):
+        return True
+    if os.path.isdir(checkpoint_path) and ("t5" in cp_lower or os.path.exists(os.path.join(checkpoint_path, "spiece.model"))):
+        return True
+    return False
+
+
+def is_distilgpt2_baseline(checkpoint_path: Optional[str]) -> bool:
+    if not checkpoint_path:
+        return False
+    cp_lower = checkpoint_path.lower()
+    if cp_lower in ("distilgpt2", "distilgpt-2"):
+        return True
+    if os.path.isdir(checkpoint_path) and ("gpt2" in cp_lower or os.path.exists(os.path.join(checkpoint_path, "vocab.json"))):
+        return True
+    return False
+
+
 def load_model(
     checkpoint_path: Optional[str],
     device: torch.device,
     dtype: torch.dtype,
     model_size: str = "nano",
-) -> Tuple[JEDM2Model, str]:
+) -> Tuple[Union[JEDM2Model, T5SmallActionAgent, DistilGPT2ActionAgent], str]:
     """
     Loads JEDM2Model from a checkpoint file or creates an initialized baseline model.
+    Also handles pretrained small language model baselines (T5-Small, DistilGPT-2).
 
     Args:
-        checkpoint_path: Path to checkpoint .pt file or None.
+        checkpoint_path: Path to checkpoint .pt file, baseline key name, or None.
         device: Hardware device.
         dtype: PyTorch data type.
         model_size: Default model size tier if not specified in checkpoint.
@@ -178,6 +214,22 @@ def load_model(
     Returns:
         Tuple of (model, checkpoint_label).
     """
+    if is_t5_baseline(checkpoint_path):
+        model_dir = checkpoint_path if os.path.isdir(checkpoint_path) else "t5-small"
+        model = T5SmallActionAgent(model_name_or_path=model_dir, local_files_only=True)
+        model.to(device=device)
+        model.eval()
+        label = "T5-Small (~60.5M)" if checkpoint_path in ("t5_small", "t5-small") else os.path.basename(checkpoint_path)
+        return model, label
+
+    if is_distilgpt2_baseline(checkpoint_path):
+        model_dir = checkpoint_path if os.path.isdir(checkpoint_path) else "distilbert/distilgpt2"
+        model = DistilGPT2ActionAgent(model_name_or_path=model_dir, local_files_only=True)
+        model.to(device=device)
+        model.eval()
+        label = "DistilGPT-2 (~81.9M)" if checkpoint_path in ("distilgpt2", "distilgpt-2") else os.path.basename(checkpoint_path)
+        return model, label
+
     if checkpoint_path is None or checkpoint_path.lower() == "random" or not os.path.exists(checkpoint_path):
         config = JEDM2MediumConfig() if model_size == "medium" else JEDM2Config()
         model = JEDM2Model(config)
@@ -374,16 +426,19 @@ def run_benchmark_for_checkpoint(
 
     # Load model
     model, label = load_model(checkpoint_path, device=device, dtype=dtype, model_size=model_size)
-    tokenizer = SimpleLAMTokenizer(model.config.vocab_size)
-    agent = JEDM2Agent(
-        model=model,
-        config=model.config,
-        tokenizer=tokenizer,
-        device=device,
-        dtype=dtype,
-        use_jepa_planning=use_jepa_planning,
-        jepa_planning_lambda=jepa_lambda,
-    )
+    if isinstance(model, (T5SmallActionAgent, DistilGPT2ActionAgent)):
+        agent = SmallLMAgentWrapper(model, device=device, dtype=dtype)
+    else:
+        tokenizer = SimpleLAMTokenizer(model.config.vocab_size)
+        agent = JEDM2Agent(
+            model=model,
+            config=model.config,
+            tokenizer=tokenizer,
+            device=device,
+            dtype=dtype,
+            use_jepa_planning=use_jepa_planning,
+            jepa_planning_lambda=jepa_lambda,
+        )
     evaluator = TaskEvaluator(tolerance_radius=tolerance)
 
     if benchmark_name in ("real_web", "mind2web"):
@@ -459,13 +514,19 @@ def main():
         checkpoints.extend(args.checkpoints)
     elif args.model_path:
         checkpoints.append(args.model_path)
-    else:
+    elif not args.baselines:
         # Default fallback: check if baseline SFT checkpoint exists
         default_sft = os.path.join("checkpoints", "jed_m2_sft_base.pt")
         if os.path.exists(default_sft):
             checkpoints.append(default_sft)
         else:
             checkpoints.append(None)
+
+    # Append any baselines specified via --baselines
+    if args.baselines:
+        for b in args.baselines:
+            if b not in checkpoints:
+                checkpoints.append(b)
 
     print("=" * 80)
     print(" JED-M2 Large Action Model - Benchmark Evaluation Suite".center(80))

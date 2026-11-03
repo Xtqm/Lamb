@@ -51,10 +51,10 @@ The system SHALL support online closed-loop multi-turn agent evaluation across i
 - **THEN** execution proceeds without in-the-loop completion referee overrides, terminating exclusively on agent-emitted FINISH or maximum step timeout
 
 ### Requirement: Comparative Checkpoint Benchmarking and Reporting
-The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) supporting configurable model scaling tiers (`--model_size {nano,medium}`), evaluating multiple model checkpoints side-by-side (including Step 15,800 SFT and final online GRPO-trained checkpoints), rendering clean ASCII terminal comparison tables, and exporting formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).
+The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) supporting configurable model scaling tiers (`--model_size {nano,medium}`), evaluating multiple model checkpoints and external Small-LM baseline models (T5-Small, DistilGPT-2) side-by-side, rendering clean ASCII terminal comparison tables, and exporting formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).
 
 #### Scenario: Side-by-side checkpoint comparison
-- **WHEN** multiple checkpoint paths (e.g. SFT baseline vs. GRPO RL checkpoints) are passed to the comparative evaluation runner
+- **WHEN** multiple checkpoint paths (e.g. SFT baseline vs. GRPO RL checkpoints vs. Small-LM baselines) are passed to the comparative evaluation runner
 - **THEN** the system evaluates all checkpoints on identical benchmark task distributions and outputs a side-by-side comparative metric table.
 
 #### Scenario: Formal Markdown report export
@@ -64,6 +64,10 @@ The system SHALL provide a comparative evaluation runner and CLI script (`eval_b
 #### Scenario: Benchmark evaluation with configurable model size
 - **WHEN** `eval_benchmarks.py` is executed with `--model_size medium`
 - **THEN** the runner loads or instantiates the medium architecture configuration, executes inference evaluation passes with $O(1)$ latent state caching, and computes evaluation metrics without memory errors
+
+#### Scenario: Small language model baseline comparison
+- **WHEN** comparative evaluation includes T5-Small or DistilGPT-2 baseline models
+- **THEN** the benchmark harness evaluates each baseline on identical prompt sequences and reports parameter counts, latency, action accuracy, coordinate precision, and step accuracy in the comparative report
 
 #### Scenario: Phase 14 comparative evaluation report
 - **WHEN** `eval_benchmarks.py` is run comparing Step 2,500 checkpoint against Phase 14 with active JEPA planning

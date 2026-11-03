@@ -870,6 +870,7 @@ def evaluate_offline_dataset(
                 obs_text=turn.obs_text,
                 obs_features=turn.obs_features,
                 screenshot=getattr(turn, "screenshot", None),
+                candidate_elements=getattr(turn, "elements", None),
             )
 
             latency_ms = (time.perf_counter() - t_start) * 1000.0
