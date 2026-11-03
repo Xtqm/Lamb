@@ -51,7 +51,7 @@ The system SHALL support online closed-loop multi-turn agent evaluation across i
 - **THEN** execution proceeds without in-the-loop completion referee overrides, terminating exclusively on agent-emitted FINISH or maximum step timeout
 
 ### Requirement: Comparative Checkpoint Benchmarking and Reporting
-The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) supporting configurable model scaling tiers (`--model_size {nano,medium}`), evaluating multiple model checkpoints (including baseline SFT, unified pretrain with Byte-Level BPE, and online GRPO post-trained policies) and external Small-LM baseline models (T5-Small, DistilGPT-2) side-by-side, automatically selecting the appropriate tokenizer based on checkpoint metadata, rendering clean ASCII terminal comparison tables, and exporting formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).
+The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) supporting configurable model scaling tiers (`--model_size {nano,medium}`), evaluating multiple model checkpoints (including baseline SFT, unified pretrain with Byte-Level BPE, online GRPO post-trained policies, and fine-tuned Small-LM baselines T5-Small and DistilGPT-2) side-by-side from checkpoint files or fine-tuned model directories, automatically selecting the appropriate tokenizer based on checkpoint metadata, rendering clean ASCII terminal comparison tables, and exporting formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).
 
 #### Scenario: Side-by-side checkpoint comparison
 - **WHEN** multiple checkpoint paths (e.g. SFT baseline vs. GRPO RL checkpoints vs. Small-LM baselines) are passed to the comparative evaluation runner
@@ -80,6 +80,10 @@ The system SHALL provide a comparative evaluation runner and CLI script (`eval_b
 #### Scenario: Tokenizer auto-detection for BPE and legacy checkpoints
 - **WHEN** loading checkpoints with distinct vocabulary configurations (e.g. BPE-based unified pretrain/RL checkpoints vs. legacy SFT checkpoints)
 - **THEN** the runner automatically detects vocabulary size or checkpoint metadata and instantiates the matching tokenizer (`ActionBPETokenizer` or `SimpleLAMTokenizer`)
+
+#### Scenario: Fine-tuned baseline checkpoint directory loading
+- **WHEN** checkpoint paths pointing to fine-tuned Small-LM model directories (e.g. `checkpoints/baseline_t5_small` or `checkpoints/baseline_distilgpt2`) are passed to `eval_benchmarks.py`
+- **THEN** the runner loads the fine-tuned baseline weights and tokenizers from the directory, evaluates them on identical held-out test episodes, and reports metrics under their fine-tuned labels
 
 ### Requirement: Hardware and VRAM Constraint Adherence
 The evaluation harness SHALL execute with gradient calculation disabled (`torch.no_grad()`), supporting `torch.bfloat16` precision, and strictly adhere to a peak GPU VRAM allocation ceiling of 6.0 GB (6144.0 MB).

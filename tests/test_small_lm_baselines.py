@@ -212,6 +212,32 @@ class TestSmallLMBaselines(unittest.TestCase):
         self.assertIsInstance(gpt2_model, DistilGPT2ActionAgent)
         self.assertIn("DistilGPT-2", gpt2_label)
 
+    def test_baseline_checkpoint_save_and_load_roundtrip(self):
+        """Verifies baseline save_pretrained, directory checkpoint loading, and distinct labeling."""
+        import tempfile
+        from eval_benchmarks import load_model
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. T5-Small Save and Load
+            t5_path = Path(tmp_dir) / "baseline_t5_small"
+            t5_agent = T5SmallActionAgent(local_files_only=True)
+            t5_agent.save_pretrained(str(t5_path))
+            self.assertTrue((t5_path / "config.json").exists())
+
+            loaded_t5, t5_label = load_model(str(t5_path), device=torch.device("cpu"), dtype=torch.float32)
+            self.assertIsInstance(loaded_t5, T5SmallActionAgent)
+            self.assertEqual(t5_label, "T5-Small (Fine-Tuned ~60.5M)")
+
+            # 2. DistilGPT-2 Save and Load
+            gpt2_path = Path(tmp_dir) / "baseline_distilgpt2"
+            gpt2_agent = DistilGPT2ActionAgent(local_files_only=True)
+            gpt2_agent.save_pretrained(str(gpt2_path))
+            self.assertTrue((gpt2_path / "config.json").exists())
+
+            loaded_gpt2, gpt2_label = load_model(str(gpt2_path), device=torch.device("cpu"), dtype=torch.float32)
+            self.assertIsInstance(loaded_gpt2, DistilGPT2ActionAgent)
+            self.assertEqual(gpt2_label, "DistilGPT-2 (Fine-Tuned ~81.9M)")
+
     def test_offline_replay_with_baseline_wrapper(self):
         """Verifies evaluate_offline_dataset executes with SmallLMAgentWrapper without errors."""
         from jed_m2.benchmark import TaskEvaluator, evaluate_offline_dataset

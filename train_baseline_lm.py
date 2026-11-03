@@ -8,6 +8,7 @@ STRICT CONVENTION: Pure 7-bit ASCII logging (no Unicode box-drawing characters).
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -17,6 +18,7 @@ from typing import List, Tuple
 
 import torch
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from jed_m2.core.types import UIElement
 from jed_m2.heads import ActionType
@@ -167,6 +169,31 @@ def collect_training_samples(
     return samples
 
 
+def compute_eval_loss(
+    agent,
+    eval_samples: List[Tuple[str, str]],
+    device: torch.device,
+    batch_size: int = 4,
+    max_eval_batches: int = 10,
+) -> float:
+    """Computes mean sequence cross-entropy loss over a validation sample set."""
+    if not eval_samples:
+        return 0.0
+    agent.eval()
+    total_loss = 0.0
+    n_batches = 0
+    with torch.no_grad():
+        for i in range(0, min(len(eval_samples), max_eval_batches * batch_size), batch_size):
+            batch = eval_samples[i : i + batch_size]
+            prompts = [s[0] for s in batch]
+            targets = [s[1] for s in batch]
+            loss = agent.compute_loss(prompts, targets, device=device)
+            total_loss += loss.item()
+            n_batches += 1
+    agent.train()
+    return total_loss / max(1, n_batches)
+
+
 def main():
     args = parse_args()
     device = torch.device(args.device)
@@ -219,16 +246,29 @@ def main():
 
     # 3. Optimization Setup
     optimizer = AdamW(agent.model.parameters(), lr=args.lr, weight_decay=0.01)
-    agent.train()
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.max_steps, eta_min=args.lr * 0.1)
 
+    # 4. Validation Baseline
+    val_env = RealTaskDOMEnvironment(
+        manifest_path=args.manifest,
+        split="val",
+        real_only=False,
+        max_tasks=15,
+    )
+    val_samples = collect_training_samples(val_env, formatter, max_samples=40)
+    init_val_loss = compute_eval_loss(agent, val_samples, device=device)
+    print(f"Pre-Training Initial Validation Loss: {init_val_loss:.4f}")
+
+    agent.train()
     print("\nStarting optimization loop...")
     print("-" * 80)
-    print("Step    | Loss      | Elapsed   | Peak VRAM")
+    print("Step    | Loss      | LR        | Elapsed   | Peak VRAM")
     print("-" * 80)
 
     sample_idx = 0
     t0 = time.time()
     accum_loss = 0.0
+    history_losses = []
 
     for step in range(1, args.max_steps + 1):
         optimizer.zero_grad()
@@ -250,21 +290,48 @@ def main():
 
         torch.nn.utils.clip_grad_norm_(agent.model.parameters(), max_norm=1.0)
         optimizer.step()
+        scheduler.step()
         accum_loss += step_loss
+        history_losses.append(step_loss)
 
         if step % 10 == 0 or step == args.max_steps:
             elapsed = time.time() - t0
+            curr_lr = scheduler.get_last_lr()[0]
             peak_vram = (
                 torch.cuda.max_memory_allocated(device) / (1024 * 1024)
                 if args.device == "cuda"
                 else 0.0
             )
-            print(f"{step:6d}  | {step_loss:9.4f} | {elapsed:7.1f}s  | {peak_vram:6.1f} MB")
+            print(f"{step:6d}  | {step_loss:9.4f} | {curr_lr:.2e}  | {elapsed:7.1f}s  | {peak_vram:6.1f} MB")
 
-    # 4. Save Fine-Tuned Weights
-    agent.save_pretrained(output_dir)
+    # 5. Final Validation & Checkpoint Serialization
+    final_val_loss = compute_eval_loss(agent, val_samples, device=device)
     print("-" * 80)
-    print(f"Saved fine-tuned baseline model to: {output_dir}")
+    print(f"Post-Training Final Validation Loss: {final_val_loss:.4f} (Delta: {final_val_loss - init_val_loss:+.4f})")
+
+    agent.save_pretrained(output_dir)
+    meta = {
+        "model_type": args.model_type,
+        "manifest": args.manifest,
+        "max_steps": args.max_steps,
+        "batch_size": args.batch_size,
+        "effective_batch_size": args.batch_size * args.grad_accum_steps,
+        "lr": args.lr,
+        "initial_train_loss": history_losses[0] if history_losses else None,
+        "final_train_loss": history_losses[-1] if history_losses else None,
+        "initial_val_loss": init_val_loss,
+        "final_val_loss": final_val_loss,
+        "elapsed_seconds": time.time() - t0,
+        "peak_vram_mb": (
+            torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+            if args.device == "cuda"
+            else 0.0
+        ),
+    }
+    with open(os.path.join(output_dir, "training_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+    print(f"Saved fine-tuned baseline model and metadata to: {output_dir}")
 
 
 if __name__ == "__main__":

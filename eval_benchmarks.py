@@ -257,7 +257,12 @@ def load_model(
         model = T5SmallActionAgent(model_name_or_path=model_dir, local_files_only=True)
         model.to(device=device)
         model.eval()
-        label = "T5-Small (~60.5M)" if checkpoint_path in ("t5_small", "t5-small") else os.path.basename(checkpoint_path)
+        if checkpoint_path in ("t5_small", "t5-small"):
+            label = "T5-Small (~60.5M)"
+        elif "baseline_t5_small" in str(checkpoint_path) or "finetuned" in str(checkpoint_path):
+            label = "T5-Small (Fine-Tuned ~60.5M)"
+        else:
+            label = f"T5-Small ({os.path.basename(checkpoint_path)})"
         return model, label
 
     if is_distilgpt2_baseline(checkpoint_path):
@@ -265,7 +270,12 @@ def load_model(
         model = DistilGPT2ActionAgent(model_name_or_path=model_dir, local_files_only=True)
         model.to(device=device)
         model.eval()
-        label = "DistilGPT-2 (~81.9M)" if checkpoint_path in ("distilgpt2", "distilgpt-2") else os.path.basename(checkpoint_path)
+        if checkpoint_path in ("distilgpt2", "distilgpt-2"):
+            label = "DistilGPT-2 (~81.9M)"
+        elif "baseline_distilgpt2" in str(checkpoint_path) or "finetuned" in str(checkpoint_path):
+            label = "DistilGPT-2 (Fine-Tuned ~81.9M)"
+        else:
+            label = f"DistilGPT-2 ({os.path.basename(checkpoint_path)})"
         return model, label
 
     if checkpoint_path is None or checkpoint_path.lower() == "random" or not os.path.exists(checkpoint_path):
