@@ -116,6 +116,47 @@ class StandardMHA(nn.Module):
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, S, self.all_head_dim)
         return self.out_proj(attn_out)
 
+    def prefill(
+        self,
+        x: torch.Tensor,
+        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        start_pos: int = 0,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Parallel prompt prefill for Standard MHA.
+        Computes sequence forward pass and builds initial (k_cache, v_cache).
+        """
+        B, S, _ = x.shape
+        q = self.q_proj(x).view(B, S, self.num_heads, self.head_dim)
+        k = self.k_proj(x).view(B, S, self.num_heads, self.head_dim)
+        v = self.v_proj(x).view(B, S, self.num_heads, self.head_dim)
+
+        q = self.rope(q, seq_len=S, start_pos=start_pos)
+        k = self.rope(k, seq_len=S, start_pos=start_pos)
+
+        if kv_cache is not None:
+            k_prev, v_prev = kv_cache
+            k_all = torch.cat([k_prev, k], dim=1)
+            v_all = torch.cat([v_prev, v], dim=1)
+        else:
+            k_all = k
+            v_all = v
+
+        q_trans = q.transpose(1, 2)
+        k_trans = k_all.transpose(1, 2)
+        v_trans = v_all.transpose(1, 2)
+
+        is_causal = attention_mask is None and k_trans.shape[2] > 1
+        attn_out = F.scaled_dot_product_attention(
+            q_trans, k_trans, v_trans, attn_mask=attention_mask, is_causal=is_causal
+        )
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, S, self.all_head_dim)
+        out = self.out_proj(attn_out)
+
+        initial_kv_cache = (k_all, v_all)
+        return out, initial_kv_cache
+
     def step(
         self,
         x_t: torch.Tensor,

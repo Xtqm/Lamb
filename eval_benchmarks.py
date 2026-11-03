@@ -33,15 +33,17 @@ from jed_m2.benchmark import (
     evaluate_offline_dataset,
     evaluate_online_environment,
 )
+from jed_m2.bpe_tokenizer import ActionBPETokenizer
 from jed_m2.config import JEDM2Config, JEDM2MediumConfig
 from jed_m2.dataset import (
     AgentTrajectoryDataset,
+    LegacyHashTokenizer,
     SimpleLAMTokenizer,
     SyntheticTrajectoryGenerator,
     TrajectorySample,
 )
 from jed_m2.environment import ScenarioDefinition, WebOSEnvironment, get_default_scenarios
-from jed_m2.model import JEDM2Model
+from jed_m2.model import JEDM2Model, adapt_state_dict_for_action_classes
 from jed_m2.real_dataset import RealWebTrajectoryDataset
 from jed_m2.small_lm_baselines import (
     DistilGPT2ActionAgent,
@@ -195,6 +197,42 @@ def is_distilgpt2_baseline(checkpoint_path: Optional[str]) -> bool:
     return False
 
 
+def detect_tokenizer_for_checkpoint(
+    checkpoint_path: Optional[str],
+    model_config: Any,
+) -> Any:
+    """
+    Auto-detects and returns the appropriate tokenizer for a given checkpoint.
+    - Checkpoints from pretrain_unified, GRPO, or BPE-trained models use ActionBPETokenizer.
+    - Legacy SFT base checkpoints from Phase 6C or earlier use LegacyHashTokenizer.
+    - Fallback default is ActionBPETokenizer.
+    """
+    if checkpoint_path is None or not os.path.exists(checkpoint_path):
+        return ActionBPETokenizer(vocab_size=model_config.vocab_size)
+
+    cp_str = str(checkpoint_path).lower().replace("\\", "/")
+    if any(k in cp_str for k in ("bpe", "pretrain_unified", "grpo", "nano_pretrain", "pretrain")):
+        return ActionBPETokenizer(vocab_size=model_config.vocab_size)
+    if any(k in cp_str for k in ("sft_base", "phase_6c", "phase6c")):
+        return LegacyHashTokenizer(vocab_size=model_config.vocab_size)
+
+    try:
+        data = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if isinstance(data, dict):
+            add_info = data.get("additional_info", {})
+            if isinstance(add_info, dict):
+                phase = add_info.get("phase", "")
+                baseline = add_info.get("baseline_type", "")
+                if phase in ("Phase 6C", "Phase 6B", "Phase 6A") or baseline == "sft_production_base":
+                    return LegacyHashTokenizer(vocab_size=model_config.vocab_size)
+            if data.get("tokenizer_type") in ("legacy_hash", "hash"):
+                return LegacyHashTokenizer(vocab_size=model_config.vocab_size)
+    except Exception:
+        pass
+
+    return ActionBPETokenizer(vocab_size=model_config.vocab_size)
+
+
 def load_model(
     checkpoint_path: Optional[str],
     device: torch.device,
@@ -264,6 +302,7 @@ def load_model(
 
         config = JEDM2MediumConfig() if detected_size == "medium" else JEDM2Config()
         model = JEDM2Model(config)
+        state_dict = adapt_state_dict_for_action_classes(state_dict, target_classes=config.num_action_types)
         model_keys = set(model.state_dict().keys())
         ckpt_keys = set(state_dict.keys())
 
@@ -429,7 +468,7 @@ def run_benchmark_for_checkpoint(
     if isinstance(model, (T5SmallActionAgent, DistilGPT2ActionAgent)):
         agent = SmallLMAgentWrapper(model, device=device, dtype=dtype)
     else:
-        tokenizer = SimpleLAMTokenizer(model.config.vocab_size)
+        tokenizer = detect_tokenizer_for_checkpoint(checkpoint_path, model.config)
         agent = JEDM2Agent(
             model=model,
             config=model.config,

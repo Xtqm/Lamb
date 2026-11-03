@@ -198,6 +198,73 @@ class MambaBlock(nn.Module):
         out = self.out_proj(y)
         return out
 
+    def prefill(
+        self,
+        x: torch.Tensor,
+        ssm_state: Optional[torch.Tensor] = None,
+        conv_state: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Parallel prompt prefill for Mamba SSM.
+        Executes sequence forward via parallel associative scan and extracts
+        the final SSM hidden state and causal convolution buffer to seed
+        subsequent autoregressive step(...) rollouts.
+
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, hidden_dim].
+            ssm_state: Optional initial SSM state [batch_size, d_inner, d_state].
+            conv_state: Optional initial 1D convolution buffer [batch_size, d_inner, d_conv].
+
+        Returns:
+            Tuple of:
+            - out: Output tensor of shape [batch_size, seq_len, hidden_dim].
+            - final_ssm_state: SSM state at final timestep [batch_size, d_inner, d_state].
+            - final_conv_state: 1D convolution buffer [batch_size, d_inner, d_conv].
+        """
+        batch_size, seq_len, _ = x.shape
+        xz = self.in_proj(x)
+        u, z = xz.chunk(2, dim=-1)
+
+        u_conv_in = u.transpose(1, 2)
+        if conv_state is not None:
+            pad_slice = conv_state[:, :, -(self.d_conv - 1):]
+            u_conv_padded = torch.cat([pad_slice, u_conv_in], dim=-1)
+        else:
+            u_conv_padded = F.pad(u_conv_in, (self.d_conv - 1, 0))
+        u_conv = self.conv1d(u_conv_padded)
+        u_conv = F.silu(u_conv).transpose(1, 2)
+
+        x_dbl = self.x_proj(u_conv)
+        delta_raw, B_proj, C_proj = torch.split(
+            x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1
+        )
+        delta = F.softplus(self.dt_proj(delta_raw))
+
+        A = -torch.exp(self.A_log.float())
+        delta_f = delta.float()
+        u_conv_f = u_conv.float()
+        B_f = B_proj.float()
+        C_f = C_proj.float()
+
+        deltaA = delta_f.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0)
+        A_bar = torch.exp(deltaA)
+        B_bar = delta_f.unsqueeze(-1) * B_f.unsqueeze(2)
+        b = B_bar * u_conv_f.unsqueeze(-1)
+        if ssm_state is not None:
+            b = b.clone()
+            b[:, 0] = b[:, 0] + A_bar[:, 0] * ssm_state.float()
+        h = parallel_associative_scan(A_bar, b)
+
+        D_f = self.D.float().unsqueeze(0).unsqueeze(0)
+        y = (h * C_f.unsqueeze(2)).sum(dim=-1) + D_f * u_conv_f
+        y = y.to(dtype=x.dtype)
+        y = y * F.silu(z)
+        out = self.out_proj(y)
+
+        final_ssm_state = h[:, -1]
+        final_conv_state = u_conv_padded[:, :, -self.d_conv:]
+        return out, final_ssm_state, final_conv_state
+
     def forward_sequential(self, x: torch.Tensor) -> torch.Tensor:
         """
         Reference sequential implementation of forward pass using Python for-loop.

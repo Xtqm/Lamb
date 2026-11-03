@@ -240,6 +240,107 @@ class MultiHeadLatentAttention(nn.Module):
         out = self.w_o(attn_out)
         return out
 
+    def prefill(
+        self,
+        x: torch.Tensor,
+        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        start_pos: int = 0,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Parallel prompt prefill for Multi-Head Latent Attention.
+        Computes sequence forward pass with causal attention and extracts
+        the initial compressed latent KV cache (c_kv, k_rope) to seed step(...) rollouts.
+
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, hidden_dim].
+            kv_cache: Optional previous KV cache tuple (c_kv_prev, k_rope_prev).
+            start_pos: Sequence position offset integer.
+            attention_mask: Optional attention mask tensor.
+
+        Returns:
+            Tuple of:
+            - out: Sequence output tensor [batch_size, seq_len, hidden_dim].
+            - initial_kv_cache: Tuple of (c_kv, k_rope) seeding subsequent step() calls.
+        """
+        b_sz, seq_len, _ = x.shape
+
+        # 1. Query projection & RoPE
+        c_q = self.w_dq(x)
+        c_q = self.q_norm(c_q)
+        q_nope = (
+            self.w_uq(c_q)
+            .view(b_sz, seq_len, self.num_heads, self.qk_nope_head_dim)
+            .transpose(1, 2)
+        )
+        q_rope = self.w_qr(c_q).view(
+            b_sz, seq_len, self.num_heads, self.qk_rope_head_dim
+        )
+        q_rope = self.rotary_emb(q_rope, seq_len=seq_len, start_pos=start_pos).transpose(1, 2)
+        q = torch.cat([q_nope, q_rope], dim=-1)
+
+        # 2. Key-Value projection & RoPE
+        c_kv = self.w_dkv(x)
+        c_kv = self.kv_norm(c_kv)
+        k_nope = (
+            self.w_uk(c_kv)
+            .view(b_sz, seq_len, self.num_heads, self.qk_nope_head_dim)
+            .transpose(1, 2)
+        )
+        k_rope = self.w_kr(x).view(b_sz, seq_len, 1, self.qk_rope_head_dim)
+        k_rope = self.rotary_emb(k_rope, seq_len=seq_len, start_pos=start_pos)
+        k_rope_expanded = k_rope.expand(-1, -1, self.num_heads, -1).transpose(1, 2)
+        k = torch.cat([k_nope, k_rope_expanded], dim=-1)
+
+        v = (
+            self.w_uv(c_kv)
+            .view(b_sz, seq_len, self.num_heads, self.v_head_dim)
+            .transpose(1, 2)
+        )
+
+        if kv_cache is not None:
+            c_kv_prev, k_rope_prev = kv_cache
+            c_kv_all = torch.cat([c_kv_prev, c_kv], dim=1)
+            k_rope_all = torch.cat([k_rope_prev, k_rope], dim=1)
+
+            # Reconstruct k_all and v_all from cached latents
+            S_prev = c_kv_prev.shape[1]
+            k_prev_nope = (
+                self.w_uk(c_kv_prev)
+                .view(b_sz, S_prev, self.num_heads, self.qk_nope_head_dim)
+                .transpose(1, 2)
+            )
+            k_prev_rope_exp = k_rope_prev.expand(-1, -1, self.num_heads, -1).transpose(1, 2)
+            k_prev = torch.cat([k_prev_nope, k_prev_rope_exp], dim=-1)
+            v_prev = (
+                self.w_uv(c_kv_prev)
+                .view(b_sz, S_prev, self.num_heads, self.v_head_dim)
+                .transpose(1, 2)
+            )
+
+            k_combined = torch.cat([k_prev, k], dim=2)
+            v_combined = torch.cat([v_prev, v], dim=2)
+        else:
+            c_kv_all = c_kv
+            k_rope_all = k_rope
+            k_combined = k
+            v_combined = v
+
+        # 3. Scaled Dot-Product Attention
+        attn_out = F.scaled_dot_product_attention(
+            query=q,
+            key=k_combined,
+            value=v_combined,
+            attn_mask=attention_mask,
+            dropout_p=self.dropout_p if self.training else 0.0,
+            is_causal=(attention_mask is None and k_combined.shape[2] > 1),
+        )
+        attn_out = attn_out.transpose(1, 2).contiguous().view(b_sz, seq_len, self.num_heads * self.v_head_dim)
+        out = self.w_o(attn_out)
+
+        initial_kv_cache = (c_kv_all, k_rope_all)
+        return out, initial_kv_cache
+
     def step(
         self,
         x_t: torch.Tensor,

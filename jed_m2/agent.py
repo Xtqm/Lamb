@@ -213,7 +213,8 @@ class JEDM2Agent:
         visual_tokens: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, ActionOutput]:
         """
-        Sequentially feeds a sequence of token IDs through the recurrent rollout.
+        Feeds a sequence of token IDs through parallel prompt prefill (model.prefill),
+        advancing recurrent states and position counter in a single parallel tensor pass.
 
         Args:
             token_ids: List of integer token IDs.
@@ -225,10 +226,24 @@ class JEDM2Agent:
         if not token_ids:
             raise ValueError("Token sequence cannot be empty.")
 
-        last_lm_logits = None
-        last_action_out = None
-        for tok in token_ids:
-            last_lm_logits, last_action_out = self._feed_single_token(tok, visual_tokens=visual_tokens)
+        device = self.device
+        max_prompt_len = max(16, self.config.max_seq_len - self.max_thought_tokens)
+        if len(token_ids) > max_prompt_len:
+            token_ids = token_ids[-max_prompt_len:]
+
+        inp_tensor = torch.tensor(token_ids, dtype=torch.long, device=device).unsqueeze(0)
+        start_pos = self.current_pos
+
+        with torch.no_grad():
+            last_lm_logits, last_action_out, new_states = self.model.prefill(
+                inp_tensor,
+                states=self.recurrent_states,
+                start_pos=start_pos,
+                visual_tokens=visual_tokens,
+            )
+
+        self.recurrent_states = new_states
+        self.current_pos = start_pos + len(token_ids)
         return last_lm_logits, last_action_out
 
     def predict_next_latent_state(

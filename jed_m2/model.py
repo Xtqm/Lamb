@@ -230,6 +230,48 @@ class JEDM2Block(nn.Module):
         next_state = (next_ssm_state, next_conv_state, next_kv_cache)
         return x_t, next_state
 
+    def prefill(
+        self,
+        x: torch.Tensor,
+        state: Optional[Tuple[Any, Any, Any]] = None,
+        start_pos: int = 0,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Tuple[Any, Any, Any]]:
+        """
+        Parallel prompt prefill for composite JEDM2Block.
+        Processes the sequence in a single parallel pass using parallel scan and attention,
+        returning the transformed representation and final layer state.
+        """
+        ssm_state, conv_state, kv_cache = (None, None, None) if state is None else state
+
+        # 1. Mamba SSM parallel prefill
+        if self.use_mamba and self.mamba is not None:
+            norm_mamba_in = self.norm_mamba(x)
+            mamba_out, final_ssm, final_conv = self.mamba.prefill(
+                norm_mamba_in, ssm_state=ssm_state, conv_state=conv_state
+            )
+            x = x + mamba_out
+        else:
+            final_ssm, final_conv = None, None
+
+        # 2. Attention parallel prefill (MLA or Standard MHA)
+        norm_attn_in = self.norm_attn(x)
+        attn_out, next_kv_cache = self.attn.prefill(
+            norm_attn_in, kv_cache=kv_cache, start_pos=start_pos, attention_mask=attention_mask
+        )
+        x = x + attn_out
+
+        # 3. Feed-Forward Network
+        norm_ffn_in = self.norm_ffn(x)
+        if self.ffn_type == "dense":
+            ffn_out = self.ffn(norm_ffn_in)
+        else:
+            ffn_out, _ = self.ffn(norm_ffn_in)
+        x = x + ffn_out
+
+        final_layer_state = (final_ssm, final_conv, next_kv_cache)
+        return x, final_layer_state
+
 
 def adapt_state_dict_for_action_classes(
     state_dict: Dict[str, Any], target_classes: int = 7
@@ -536,6 +578,58 @@ class JEDM2Model(nn.Module):
         action_output_t = self.action_head(h_t, visual_tokens=visual_tokens)
 
         return lm_logits_t, action_output_t, next_states
+
+    def prefill(
+        self,
+        input_ids: torch.Tensor,
+        states: Optional[List[Tuple[Any, Any, Any]]] = None,
+        start_pos: int = 0,
+        visual_tokens: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, ActionOutput, List[Tuple[Any, Any, Any]]]:
+        """
+        Parallel prompt prefill across all stacked layers.
+        Ingests the full token prompt sequence [B, seq_len] in a single parallel
+        tensor pass using parallel associative scan and parallel attention,
+        extracts the final token's LM logits and ActionOutput, and seeds the
+        recurrent state buffers for subsequent O(1) step(...) rollouts.
+
+        Args:
+            input_ids: Input token tensor [B, seq_len].
+            states: Optional list of per-layer state tuples from previous turns.
+            start_pos: Sequence position offset (default 0).
+            visual_tokens: Optional visual patch tokens [B, N_v, hidden_dim].
+
+        Returns:
+            Tuple of:
+            - last_lm_logits: Vocabulary logits for final prompt token [B, vocab_size].
+            - last_action_output: ActionOutput container for final prompt token.
+            - new_states: List of per-layer state tuples to seed step(...) rollouts.
+        """
+        if input_ids.ndim == 1:
+            input_ids = input_ids.unsqueeze(0)  # [1, seq_len]
+
+        B, seq_len = input_ids.shape
+        x = self.tok_embeddings(input_ids)  # [B, seq_len, hidden_dim]
+
+        new_states = []
+        for i, block in enumerate(self.blocks):
+            layer_state = states[i] if states is not None and i < len(states) else None
+            x, next_layer_state = block.prefill(x, state=layer_state, start_pos=start_pos)
+            new_states.append(next_layer_state)
+
+        # Final RMSNorm
+        h = self.norm_f(x)  # [B, seq_len, hidden_dim]
+
+        # Extract representation at last timestep for decision outputs
+        h_last = h[:, -1]  # [B, hidden_dim]
+
+        # System 2: LM Logits at final prompt position
+        last_lm_logits = self.lm_head(h_last)  # [B, vocab_size]
+
+        # System 1: Action output at final prompt position
+        last_action_output = self.action_head(h_last, visual_tokens=visual_tokens)
+
+        return last_lm_logits, last_action_output, new_states
 
     def count_parameters(self) -> Dict[str, int]:
         """

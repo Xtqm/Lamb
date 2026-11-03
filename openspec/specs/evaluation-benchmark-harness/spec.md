@@ -51,7 +51,7 @@ The system SHALL support online closed-loop multi-turn agent evaluation across i
 - **THEN** execution proceeds without in-the-loop completion referee overrides, terminating exclusively on agent-emitted FINISH or maximum step timeout
 
 ### Requirement: Comparative Checkpoint Benchmarking and Reporting
-The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) supporting configurable model scaling tiers (`--model_size {nano,medium}`), evaluating multiple model checkpoints and external Small-LM baseline models (T5-Small, DistilGPT-2) side-by-side, rendering clean ASCII terminal comparison tables, and exporting formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).
+The system SHALL provide a comparative evaluation runner and CLI script (`eval_benchmarks.py`) supporting configurable model scaling tiers (`--model_size {nano,medium}`), evaluating multiple model checkpoints (including baseline SFT, unified pretrain with Byte-Level BPE, and online GRPO post-trained policies) and external Small-LM baseline models (T5-Small, DistilGPT-2) side-by-side, automatically selecting the appropriate tokenizer based on checkpoint metadata, rendering clean ASCII terminal comparison tables, and exporting formal benchmark reports to Markdown (`BENCHMARK_REPORT.md`).
 
 #### Scenario: Side-by-side checkpoint comparison
 - **WHEN** multiple checkpoint paths (e.g. SFT baseline vs. GRPO RL checkpoints vs. Small-LM baselines) are passed to the comparative evaluation runner
@@ -76,6 +76,10 @@ The system SHALL provide a comparative evaluation runner and CLI script (`eval_b
 #### Scenario: Real-web validation benchmark execution
 - **WHEN** evaluating on the `real_web_val` split
 - **THEN** the harness evaluates action accuracy, F1, coordinate MAE, and tolerance accuracy at $\epsilon \le 0.05$ across all validation episodes
+
+#### Scenario: Tokenizer auto-detection for BPE and legacy checkpoints
+- **WHEN** loading checkpoints with distinct vocabulary configurations (e.g. BPE-based unified pretrain/RL checkpoints vs. legacy SFT checkpoints)
+- **THEN** the runner automatically detects vocabulary size or checkpoint metadata and instantiates the matching tokenizer (`ActionBPETokenizer` or `SimpleLAMTokenizer`)
 
 ### Requirement: Hardware and VRAM Constraint Adherence
 The evaluation harness SHALL execute with gradient calculation disabled (`torch.no_grad()`), supporting `torch.bfloat16` precision, and strictly adhere to a peak GPU VRAM allocation ceiling of 6.0 GB (6144.0 MB).

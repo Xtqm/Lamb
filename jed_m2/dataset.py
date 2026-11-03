@@ -102,12 +102,13 @@ class LegacyHashTokenizer:
                 tokens.append(self._hash_word(w))
         return tokens
 
-    def decode(self, tokens: List[int]) -> str:
+    def decode(self, tokens: List[int], skip_special_tokens: bool = False) -> str:
         """Decodes token IDs into string representation."""
         words: List[str] = []
         for t in tokens:
             if t in self.inv_special_tokens:
-                words.append(self.inv_special_tokens[t])
+                if not skip_special_tokens:
+                    words.append(self.inv_special_tokens[t])
             else:
                 words.append(f"tok_{t}")
         return " ".join(words)
