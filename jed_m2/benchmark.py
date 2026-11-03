@@ -106,6 +106,10 @@ class EpisodeMetric:
     autonomous_success: bool = False
     referee_assisted: bool = False
     final_action: str = ""
+    domain: str = ""
+    website: str = ""
+    split: str = ""
+    generalization_split: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializes episode metric to dictionary."""
@@ -113,6 +117,10 @@ class EpisodeMetric:
             "episode_id": self.episode_id,
             "benchmark_name": self.benchmark_name,
             "task_goal": self.task_goal,
+            "domain": self.domain,
+            "website": self.website,
+            "split": self.split,
+            "generalization_split": self.generalization_split,
             "task_success": self.task_success,
             "autonomous_success": self.autonomous_success,
             "referee_assisted": self.referee_assisted,
@@ -159,6 +167,8 @@ class BenchmarkSummary:
     peak_vram_mb: float = 0.0
     device: str = "cpu"
     checkpoint_name: str = "default"
+    split_name: str = "test"
+    generalization_breakdown: Dict[str, Dict[str, float]] = field(default_factory=dict)
     episode_metrics: List[EpisodeMetric] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -167,6 +177,8 @@ class BenchmarkSummary:
         return {
             "benchmark_name": self.benchmark_name,
             "checkpoint_name": self.checkpoint_name,
+            "split_name": self.split_name,
+            "generalization_breakdown": self.generalization_breakdown,
             "num_episodes": self.num_episodes,
             "task_success_rate": self.task_success_rate,
             "autonomous_success_rate": self.autonomous_success_rate,
@@ -299,6 +311,10 @@ class TaskEvaluator:
         autonomous_success: Optional[bool] = None,
         referee_assisted: Optional[bool] = None,
         final_action: Optional[str] = None,
+        domain: str = "",
+        website: str = "",
+        split: str = "",
+        generalization_split: str = "",
     ) -> EpisodeMetric:
         """
         Aggregates step metrics into an episode-level metric record.
@@ -313,6 +329,10 @@ class TaskEvaluator:
             autonomous_success: Optional strict autonomous completion flag.
             referee_assisted: Optional milestone satisfaction flag.
             final_action: Optional name of the final executed action primitive.
+            domain: High-level website domain or task category.
+            website: Normalized website identity string.
+            split: Dataset split ('train', 'val', 'test').
+            generalization_split: Official Mind2Web generalization split ('cross_task', 'cross_website', 'cross_domain').
 
         Returns:
             EpisodeMetric instance.
@@ -344,6 +364,10 @@ class TaskEvaluator:
                 autonomous_success=auto_success,
                 referee_assisted=ref_assisted,
                 final_action=last_action,
+                domain=domain,
+                website=website,
+                split=split,
+                generalization_split=generalization_split,
             )
 
         step_success_count = sum(1 for sm in step_metrics if sm.subgoal_achieved or sm.action_correct)
@@ -390,6 +414,10 @@ class TaskEvaluator:
             autonomous_success=auto_success,
             referee_assisted=ref_assisted,
             final_action=last_action,
+            domain=domain,
+            website=website,
+            split=split,
+            generalization_split=generalization_split,
         )
 
     def compute_action_f1(
@@ -475,6 +503,7 @@ class TaskEvaluator:
         checkpoint_name: str = "default",
         peak_vram_mb: float = 0.0,
         device: str = "cpu",
+        split_name: str = "test",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> BenchmarkSummary:
         """
@@ -486,6 +515,7 @@ class TaskEvaluator:
             checkpoint_name: Model or checkpoint label.
             peak_vram_mb: Peak allocated VRAM in megabytes during run.
             device: Hardware device string ('cuda', 'cpu').
+            split_name: Dataset or generalization split name ('test', 'cross_task', 'cross_website', 'cross_domain').
             metadata: Optional dictionary of additional run properties.
 
         Returns:
@@ -504,6 +534,7 @@ class TaskEvaluator:
                 peak_vram_mb=peak_vram_mb,
                 device=device,
                 checkpoint_name=checkpoint_name,
+                split_name=split_name,
                 metadata=metadata or {},
             )
 
@@ -554,6 +585,31 @@ class TaskEvaluator:
         finish_prec = float(per_class_prec.get("FINISH", 0.0))
         finish_rec = float(per_class_rec.get("FINISH", 0.0))
 
+        # Compute generalization split breakdown
+        gen_breakdown: Dict[str, Dict[str, float]] = {}
+        by_split: Dict[str, List[EpisodeMetric]] = {}
+        for ep in episodes:
+            tag = ep.generalization_split or ep.domain or "overall"
+            by_split.setdefault(tag, []).append(ep)
+
+        for tag, group in by_split.items():
+            n = len(group)
+            if n == 0:
+                continue
+            asr = float(sum(1 for e in group if getattr(e, "autonomous_success", e.task_success)) / n * 100.0)
+            rar = float(sum(1 for e in group if getattr(e, "referee_assisted", e.task_success)) / n * 100.0)
+            step_sr = float(sum(e.step_success_rate for e in group) / n)
+            act_acc = float(sum(e.action_accuracy for e in group) / n)
+            c_mae = float(sum(e.mean_coord_mae for e in group) / n)
+            gen_breakdown[tag] = {
+                "num_episodes": float(n),
+                "autonomous_success_rate": asr,
+                "referee_assisted_rate": rar,
+                "step_success_rate": step_sr,
+                "action_accuracy": act_acc,
+                "coord_mae": c_mae,
+            }
+
         return BenchmarkSummary(
             benchmark_name=benchmark_name,
             num_episodes=num_episodes,
@@ -579,6 +635,8 @@ class TaskEvaluator:
             peak_vram_mb=peak_vram_mb,
             device=device,
             checkpoint_name=checkpoint_name,
+            split_name=split_name,
+            generalization_breakdown=gen_breakdown,
             episode_metrics=episodes,
             metadata=metadata or {},
         )
@@ -616,7 +674,8 @@ class TaskEvaluator:
         lines.append("+" + "=" * 92 + "+")
 
         for s in summaries:
-            name = s.checkpoint_name[:22]
+            s_label = f"{s.checkpoint_name} [{s.split_name}]" if getattr(s, "split_name", None) else s.checkpoint_name
+            name = s_label[:22]
             asr_str = f"{s.autonomous_success_rate:.1f}%"
             rar_str = f"{s.referee_assisted_rate:.1f}%"
             step_sr_str = f"{s.mean_step_success_rate:.3f}"
@@ -626,6 +685,16 @@ class TaskEvaluator:
             lat_str = f"{s.mean_decision_latency_ms:.1f}"
 
             lines.append(col_fmt.format(name, asr_str, rar_str, step_sr_str, fin_f1_str, act_f1_str, mae_str, lat_str))
+
+            if getattr(s, "generalization_breakdown", None) and len(s.generalization_breakdown) > 1:
+                for sub_tag, metrics in s.generalization_breakdown.items():
+                    sub_name = f"  - {sub_tag}"[:22]
+                    s_asr = f"{metrics['autonomous_success_rate']:.1f}%"
+                    s_rar = f"{metrics['referee_assisted_rate']:.1f}%"
+                    s_step = f"{metrics['step_success_rate']:.3f}"
+                    s_act = f"{metrics['action_accuracy']:.3f}"
+                    s_mae = f"{metrics['coord_mae']:.3f}"
+                    lines.append(col_fmt.format(sub_name, s_asr, s_rar, s_step, " - ", s_act, s_mae, " - "))
 
         lines.append(border)
         return "\n".join(lines)
@@ -663,15 +732,16 @@ class TaskEvaluator:
 
         md_lines.append("## 1. Comparative Performance Summary\n")
         md_lines.append(
-            "| Checkpoint | Episodes | Autonomous SR (%) | Referee-Assisted SR (%) | Step SR | Native FINISH F1 | Macro F1 | Micro F1 | Coord MAE | Coord Tol Acc (eps<=0.05) | Efficiency Ratio | Latency (ms/step) | Peak VRAM (MB) |"
+            "| Checkpoint | Split | Episodes | Autonomous SR (%) | Referee-Assisted SR (%) | Step SR | Native FINISH F1 | Macro F1 | Micro F1 | Coord MAE | Coord Tol Acc (eps<=0.05) | Efficiency Ratio | Latency (ms/step) | Peak VRAM (MB) |"
         )
         md_lines.append(
-            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
         )
 
         for s in summaries:
+            split_lbl = getattr(s, "split_name", "test")
             row = (
-                f"| **{s.checkpoint_name}** | {s.num_episodes} | {s.autonomous_success_rate:.2f}% | "
+                f"| **{s.checkpoint_name}** | `{split_lbl}` | {s.num_episodes} | {s.autonomous_success_rate:.2f}% | "
                 f"{s.referee_assisted_rate:.2f}% | {s.mean_step_success_rate:.4f} | {s.native_finish_f1:.4f} | "
                 f"{s.action_macro_f1:.4f} | {s.action_micro_f1:.4f} | {s.mean_coord_mae:.4f} | "
                 f"{s.coord_tolerance_accuracy:.4f} | {s.mean_efficiency_ratio:.4f} | "
@@ -680,7 +750,27 @@ class TaskEvaluator:
             md_lines.append(row)
 
         md_lines.append("\n---\n")
-        md_lines.append("## 2. Action Primitive F1 Breakdown\n")
+        md_lines.append("## 2. Generalization Split Breakdown\n")
+        md_lines.append("| Checkpoint | Split / Category | Episodes | Autonomous SR (%) | Referee-Assisted SR (%) | Step SR | Action Accuracy | Coord MAE |")
+        md_lines.append("| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
+
+        for s in summaries:
+            if getattr(s, "generalization_breakdown", None):
+                for sub_tag, metrics in s.generalization_breakdown.items():
+                    md_lines.append(
+                        f"| **{s.checkpoint_name}** | `{sub_tag}` | {int(metrics['num_episodes'])} | "
+                        f"{metrics['autonomous_success_rate']:.2f}% | {metrics['referee_assisted_rate']:.2f}% | "
+                        f"{metrics['step_success_rate']:.4f} | {metrics['action_accuracy']:.4f} | {metrics['coord_mae']:.4f} |"
+                    )
+            else:
+                md_lines.append(
+                    f"| **{s.checkpoint_name}** | `{getattr(s, 'split_name', 'test')}` | {s.num_episodes} | "
+                    f"{s.autonomous_success_rate:.2f}% | {s.referee_assisted_rate:.2f}% | "
+                    f"{s.mean_step_success_rate:.4f} | {s.action_accuracy:.4f} | {s.mean_coord_mae:.4f} |"
+                )
+
+        md_lines.append("\n---\n")
+        md_lines.append("## 3. Action Primitive F1 Breakdown\n")
         md_lines.append("| Checkpoint | CLICK | TYPE | SCROLL | NAVIGATE | API_CALL | FINISH |")
         md_lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
 
@@ -694,10 +784,11 @@ class TaskEvaluator:
             md_lines.append(row)
 
         md_lines.append("\n---\n")
-        md_lines.append("## 3. Metric Definitions & Formulas\n")
+        md_lines.append("## 4. Metric Definitions & Formulas\n")
         md_lines.append("1. **Autonomous Success Rate (ASR %)**: Exact task goal completion requiring autonomous `ActionType.FINISH` emission ($ASR = \\frac{1}{N}\\sum_{i=1}^N \\mathbb{I}(\\text{goal\\_satisfied}_i \\land \\text{action}_i == \\text{FINISH}) \\times 100$).")
         md_lines.append("2. **Referee-Assisted Rate (RAR %)**: Milestone satisfaction verified by completion referee regardless of terminal action emission.")
         md_lines.append("3. **Native FINISH F1**: Harmonic mean of precision and recall for `ActionType.FINISH` primitives.")
+        md_lines.append("4. **Generalization Boundaries**: Evaluated across Cross-Task (seen websites), Cross-Website (unseen websites, seen domain), and Cross-Domain (unseen domain).")
         md_lines.append("4. **Step Success Rate**: Ratio of valid intermediate sub-goals achieved across all execution turns.")
         md_lines.append("5. **Action Primitive Macro F1**: Unweighted harmonic mean of precision and recall across discrete tools.")
         md_lines.append("6. **Spatial Coordinate MAE**: Mean absolute error $\\frac{1}{2}(|\\hat{x} - x^*| + |\\hat{y} - y^*|)$ in normalized $[0, 1]^2$.")
@@ -724,6 +815,8 @@ def evaluate_offline_dataset(
     benchmark_name: str = "offline_replay",
     checkpoint_name: str = "default",
     max_episodes: Optional[int] = None,
+    max_steps: Optional[int] = None,
+    split_name: str = "test",
 ) -> BenchmarkSummary:
     """
     Evaluates an agent on offline pre-recorded trajectory datasets (e.g. Mind2Web/WebArena).
@@ -737,6 +830,8 @@ def evaluate_offline_dataset(
         benchmark_name: Benchmark label string.
         checkpoint_name: Model or checkpoint label string.
         max_episodes: Optional upper bound on episodes to evaluate.
+        max_steps: Optional upper bound on turns to evaluate per episode.
+        split_name: Name of evaluation split ('test', 'cross_task', 'cross_website', 'cross_domain').
 
     Returns:
         BenchmarkSummary populated with comprehensive offline metrics.
@@ -766,6 +861,8 @@ def evaluate_offline_dataset(
         episode_success = True
 
         for turn_idx, turn in enumerate(sample.turns):
+            if max_steps is not None and turn_idx >= max_steps:
+                break
             t_start = time.perf_counter()
 
             # Execute agent step
@@ -823,6 +920,14 @@ def evaluate_offline_dataset(
             replay_success = episode_success and len(step_metrics) > 0
             auto_success = replay_success
 
+        prov = getattr(sample, "provenance", {}) if hasattr(sample, "provenance") and isinstance(sample.provenance, dict) else {}
+        sample_domain = getattr(sample, "domain", "") or prov.get("domain", "")
+        sample_website = getattr(sample, "website", "") or prov.get("website", "")
+        sample_split = getattr(sample, "split", "") or split_name
+        gen_split = getattr(sample, "generalization_split", "") or prov.get("generalization_split", "")
+        if not gen_split and split_name in ("cross_task", "cross_website", "cross_domain"):
+            gen_split = split_name
+
         ep_metric = evaluator.evaluate_episode(
             episode_id=sample.sample_id,
             benchmark_name=benchmark_name,
@@ -833,6 +938,10 @@ def evaluate_offline_dataset(
             autonomous_success=auto_success,
             referee_assisted=replay_success,
             final_action=last_action_name,
+            domain=sample_domain,
+            website=sample_website,
+            split=sample_split,
+            generalization_split=gen_split,
         )
         episode_metrics.append(ep_metric)
 
@@ -846,6 +955,7 @@ def evaluate_offline_dataset(
         checkpoint_name=checkpoint_name,
         peak_vram_mb=peak_vram_mb,
         device=device_str,
+        split_name=split_name,
     )
 
 
@@ -855,27 +965,29 @@ def evaluate_offline_dataset(
 
 def evaluate_online_environment(
     agent: JEDM2Agent,
-    scenarios: Optional[List[ScenarioDefinition]] = None,
+    scenarios: Optional[Union[List[ScenarioDefinition], Any]] = None,
     evaluator: Optional[TaskEvaluator] = None,
     benchmark_name: str = "webos_simulated",
     checkpoint_name: str = "default",
     num_episodes: int = 10,
     max_steps: int = 10,
     seed: int = 42,
+    split_name: str = "test",
 ) -> BenchmarkSummary:
     """
-    Evaluates an agent in online closed-loop multi-turn environments (WebOSEnvironment).
+    Evaluates an agent in online closed-loop multi-turn environments (WebOSEnvironment or RealTaskDOMEnvironment).
     Agent autonomously interacts turn-by-turn until goal completion or max_steps limit.
 
     Args:
         agent: JEDM2Agent instance wrapping JEDM2Model.
-        scenarios: Optional list of ScenarioDefinitions. Defaults to built-in ecommerce, travel, os_admin.
+        scenarios: Optional list of ScenarioDefinitions or RealTaskDOMEnvironment instance.
         evaluator: TaskEvaluator instance.
         benchmark_name: Benchmark label string.
         checkpoint_name: Model or checkpoint label string.
         num_episodes: Total number of closed-loop episodes to evaluate.
         max_steps: Maximum turns allowed per episode before truncation.
         seed: Random seed for reproducible element layouts.
+        split_name: Name of evaluation split ('test', 'cross_task', 'cross_website', 'cross_domain').
 
     Returns:
         BenchmarkSummary populated with online closed-loop metrics.
@@ -883,11 +995,20 @@ def evaluate_online_environment(
     if evaluator is None:
         evaluator = TaskEvaluator()
 
-    if scenarios is None:
+    is_real_env = False
+    real_env_inst = None
+    if scenarios is not None and hasattr(scenarios, "tasks") and hasattr(scenarios, "reset"):
+        # RealTaskDOMEnvironment passed directly
+        is_real_env = True
+        real_env_inst = scenarios
+        scenarios_list = None
+    elif scenarios is None:
         default_dict = get_default_scenarios()
-        scenarios = list(default_dict.values())
+        scenarios_list = list(default_dict.values())
     elif isinstance(scenarios, dict):
-        scenarios = list(scenarios.values())
+        scenarios_list = list(scenarios.values())
+    else:
+        scenarios_list = list(scenarios)
 
     device_str = str(agent.device)
     if "cuda" in device_str and torch.cuda.is_available():
@@ -898,16 +1019,32 @@ def evaluate_online_environment(
     referee = CompletionReferee()
 
     for ep_idx in range(num_episodes):
-        scenario = scenarios[ep_idx % len(scenarios)]
-        env = WebOSEnvironment(
-            config=agent.config,
-            scenario_id=scenario.scenario_id,
-            device=agent.device,
-            dtype=agent.dtype,
-        )
-
-        agent.reset()
-        init_res = env.reset()
+        if is_real_env:
+            env = real_env_inst
+            agent.reset()
+            task_select_idx = ep_idx % len(env.tasks)
+            init_res = env.reset(task_idx=task_select_idx)
+            cur_task = env.active_task
+            scenario_id = cur_task.task_id if cur_task else f"real_task_{ep_idx}"
+            task_goal = cur_task.goal if cur_task else env.current_goal
+            task_domain = cur_task.domain if cur_task else "web"
+            task_website = getattr(cur_task, "website", "") if cur_task else ""
+            optimal_length = min(len(cur_task.turns), max_steps) if cur_task and cur_task.turns else 5
+        else:
+            scenario = scenarios_list[ep_idx % len(scenarios_list)]
+            scenario_id = scenario.scenario_id
+            task_goal = scenario.goal
+            task_domain = getattr(scenario, "domain", "simulated")
+            task_website = getattr(scenario, "website", "")
+            env = WebOSEnvironment(
+                config=agent.config,
+                scenario_id=scenario.scenario_id,
+                device=agent.device,
+                dtype=agent.dtype,
+            )
+            agent.reset()
+            init_res = env.reset()
+            optimal_length = min(scenario.max_steps, 5)
 
         step_metrics: List[StepMetric] = []
         obs_text = init_res.obs_text
@@ -916,7 +1053,6 @@ def evaluate_online_environment(
         if screenshot is None and isinstance(init_res.info, dict):
             screenshot = init_res.info.get("screenshot", None)
 
-        optimal_length = min(scenario.max_steps, 5)
         task_success = False
 
         for turn_idx in range(max_steps):
@@ -1021,15 +1157,19 @@ def evaluate_online_environment(
         task_success = auto_success
 
         ep_metric = evaluator.evaluate_episode(
-            episode_id=f"{scenario.scenario_id}_ep{ep_idx}",
+            episode_id=f"{scenario_id}_ep{ep_idx}",
             benchmark_name=benchmark_name,
-            task_goal=scenario.goal,
+            task_goal=task_goal,
             step_metrics=step_metrics,
             task_success=task_success,
             optimal_length=optimal_length,
             autonomous_success=auto_success,
             referee_assisted=ref_assisted,
             final_action=final_action_name,
+            domain=task_domain,
+            website=task_website,
+            split=split_name,
+            generalization_split=split_name if split_name in ("cross_task", "cross_website", "cross_domain") else "",
         )
         episode_metrics.append(ep_metric)
 
@@ -1043,4 +1183,5 @@ def evaluate_online_environment(
         checkpoint_name=checkpoint_name,
         peak_vram_mb=peak_vram_mb,
         device=device_str,
+        split_name=split_name,
     )

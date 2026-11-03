@@ -94,7 +94,7 @@ The system SHALL distinguish captured real interaction traces from procedural or
 - **THEN** the real-only dataset includes only authentic traces and reports the excluded synthetic record count
 
 ### Requirement: Website-Held-Out Split Manifests
-The system SHALL support deterministic train, validation, and test manifests grouped by normalized website identity so that a website cannot occur in more than one split.
+The system SHALL support deterministic train, validation, and test manifests grouped by normalized website identity so that a website cannot occur in more than one split, and SHALL drive both offline trajectory datasets and interactive DOM simulation sandboxes directly from verified manifests.
 
 #### Scenario: Website-disjoint manifest generation
 - **WHEN** a site-grouped split is requested with a fixed seed
@@ -111,6 +111,14 @@ The system SHALL support deterministic train, validation, and test manifests gro
 #### Scenario: Insufficient site diversity
 - **WHEN** a run requests minimum site counts that the available corpus cannot satisfy
 - **THEN** preparation fails before training and reports the available and required counts for each split
+
+#### Scenario: Manifest-driven real environment simulation
+- **WHEN** `RealTaskDOMEnvironment` is initialized with a manifest path and split identifier
+- **THEN** the environment instantiates tasks exclusively from that manifest split without falling back to synthetic or mock task templates
+
+#### Scenario: Generalization split classification
+- **WHEN** real web tasks are loaded for evaluation
+- **THEN** tasks are partitioned into official Mind2Web generalization splits: cross-task (unseen tasks on seen websites), cross-website (unseen websites in seen domains), and cross-domain (unseen domains)
 
 ### Requirement: Dataset Diversity Audit
 The system SHALL produce a machine-readable and human-readable audit of the dataset selected for each experiment.

@@ -74,8 +74,20 @@ def parse_args() -> argparse.Namespace:
         "--split",
         type=str,
         default="test",
-        choices=["val", "test"],
-        help="Dataset split to evaluate: val or test.",
+        choices=["train", "val", "test", "cross_task", "cross_website", "cross_domain"],
+        help="Dataset split to evaluate: train, val, test, or official Mind2Web generalization splits (cross_task, cross_website, cross_domain).",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        default="data/manifests/real_mind2web_v1/manifest.json",
+        help="Path to verified site-held-out manifest JSON file.",
+    )
+    parser.add_argument(
+        "--real_only",
+        action="store_true",
+        default=True,
+        help="Enforce authentic trajectory evaluation with zero synthetic mock fixtures.",
     )
     parser.add_argument(
         "--num_episodes",
@@ -275,28 +287,44 @@ def load_real_web_dataset(
     num_episodes: int,
     seed: int,
     raw_mind2web_dir: Optional[str] = "data/raw_mind2web",
+    manifest_path: Optional[str] = "data/manifests/real_mind2web_v1/manifest.json",
+    real_only: bool = True,
 ) -> List[Any]:
     """
     Loads deterministic real-world web interaction trajectory episodes from RealWebTrajectoryDataset.
 
     Args:
-        split: 'val' or 'test'.
+        split: 'train', 'val', 'test', 'cross_task', 'cross_website', or 'cross_domain'.
         num_episodes: Number of trajectories.
         seed: Random seed.
         raw_mind2web_dir: Directory containing raw Mind2Web tasks and snapshots.
+        manifest_path: Path to verified site-held-out manifest JSON file.
+        real_only: Whether to enforce authentic trajectory records without synthetic fixtures.
 
     Returns:
         List of RealWebTrajectorySample objects.
     """
     config = JEDM2Config()
+    dataset_split = "test" if split in ("cross_task", "cross_website", "cross_domain") else split
+
     dataset = RealWebTrajectoryDataset(
         config=config,
-        split=split,
+        split=dataset_split,
         dataset_size=max(num_episodes, 20),
         raw_mind2web_dir=raw_mind2web_dir,
+        manifest_path=manifest_path,
+        real_only=real_only,
         seed=seed,
     )
-    return dataset.samples[:num_episodes]
+
+    samples = dataset.samples
+    if split in ("cross_task", "cross_website", "cross_domain") and manifest_path and os.path.exists(manifest_path):
+        from jed_m2.real_dataset import get_generalization_splits
+        gen_splits = get_generalization_splits(manifest_path)
+        target_ids = {t["annotation_id"] for t in gen_splits.get(split, [])}
+        samples = [s for s in samples if s.sample_id in target_ids]
+
+    return samples[:num_episodes]
 
 
 def run_benchmark_for_checkpoint(
@@ -314,6 +342,8 @@ def run_benchmark_for_checkpoint(
     use_jepa_planning: bool = False,
     jepa_lambda: float = 1.0,
     raw_mind2web_dir: Optional[str] = "data/raw_mind2web",
+    manifest_path: Optional[str] = "data/manifests/real_mind2web_v1/manifest.json",
+    real_only: bool = True,
 ) -> BenchmarkSummary:
     """
     Runs benchmark evaluation for a single model checkpoint.
@@ -321,7 +351,7 @@ def run_benchmark_for_checkpoint(
     Args:
         checkpoint_path: Path to checkpoint file or None.
         benchmark_name: 'mind2web', 'webarena', 'real_web', or 'simulated'.
-        split: 'val' or 'test'.
+        split: 'train', 'val', 'test', 'cross_task', 'cross_website', 'cross_domain'.
         num_episodes: Total episodes.
         max_steps: Maximum turns per episode.
         device_str: 'cuda' or 'cpu'.
@@ -333,6 +363,8 @@ def run_benchmark_for_checkpoint(
         use_jepa_planning: Enable active model-predictive JEPA planning.
         jepa_lambda: Planning distance penalty weight.
         raw_mind2web_dir: Directory containing raw Mind2Web data.
+        manifest_path: Path to verified site-held-out manifest JSON file.
+        real_only: Whether to enforce authentic trajectory records without synthetic fixtures.
 
     Returns:
         BenchmarkSummary for this checkpoint.
@@ -362,6 +394,8 @@ def run_benchmark_for_checkpoint(
                 num_episodes=num_episodes,
                 seed=seed,
                 raw_mind2web_dir=raw_mind2web_dir,
+                manifest_path=manifest_path,
+                real_only=real_only,
             )
 
         summary = evaluate_offline_dataset(
@@ -371,6 +405,8 @@ def run_benchmark_for_checkpoint(
             benchmark_name=f"{benchmark_name}_{split}",
             checkpoint_name=label,
             max_episodes=num_episodes,
+            max_steps=max_steps,
+            split_name=split,
         )
     elif benchmark_name == "webarena":
         # Offline dataset replay
@@ -389,6 +425,8 @@ def run_benchmark_for_checkpoint(
             benchmark_name=f"{benchmark_name}_{split}",
             checkpoint_name=label,
             max_episodes=num_episodes,
+            max_steps=max_steps,
+            split_name=split,
         )
     else:
         # Online closed-loop simulation in WebOSEnvironment
@@ -400,6 +438,7 @@ def run_benchmark_for_checkpoint(
             num_episodes=num_episodes,
             max_steps=max_steps,
             seed=seed,
+            split_name=split,
         )
 
     # Clean up model and clear GPU cache
@@ -450,6 +489,8 @@ def main():
             num_episodes=args.num_episodes,
             seed=args.seed,
             raw_mind2web_dir=args.raw_mind2web_dir,
+            manifest_path=args.manifest,
+            real_only=args.real_only,
         )
         print(f"Real web / Mind2Web dataset ready: {len(offline_trajectories)} episodes.\n")
     elif args.benchmark == "webarena":
@@ -484,6 +525,8 @@ def main():
             use_jepa_planning=args.use_jepa_planning,
             jepa_lambda=args.jepa_lambda,
             raw_mind2web_dir=args.raw_mind2web_dir,
+            manifest_path=args.manifest,
+            real_only=args.real_only,
         )
         elapsed = time.perf_counter() - t_start
         print(

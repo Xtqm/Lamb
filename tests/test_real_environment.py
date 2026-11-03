@@ -120,6 +120,50 @@ class TestRealEnvironment(unittest.TestCase):
         self.assertFalse(self.env.check_goal_criteria())
         print("PASS: test_environment_goal_criteria - Verified goal criteria queries")
 
+    def test_manifest_driven_loading(self):
+        """Verifies RealTaskDOMEnvironment loads authentic tasks directly from manifest split."""
+        manifest_env = RealTaskDOMEnvironment(
+            manifest_path="data/manifests/real_mind2web_v1/manifest.json",
+            split="test",
+            real_only=True,
+            max_tasks=10,
+        )
+        self.assertGreater(len(manifest_env.tasks), 0)
+        self.assertLessEqual(len(manifest_env.tasks), 10)
+        for task in manifest_env.tasks:
+            self.assertEqual(task.dataset_source, "mind2web")
+            self.assertFalse(task.task_id.startswith("mock_"))
+            self.assertTrue(len(task.turns) > 0)
+        print("PASS: test_manifest_driven_loading - Loaded genuine test tasks from manifest")
+
+    def test_real_only_zero_mock_fallback(self):
+        """Verifies RealTaskDOMEnvironment strictly raises errors and rejects mock fixtures in real_only mode."""
+        # 1. Missing manifest raises FileNotFoundError
+        with self.assertRaises(FileNotFoundError):
+            RealTaskDOMEnvironment(
+                manifest_path="nonexistent_manifest.json",
+                real_only=True,
+            )
+
+        # 2. Missing raw directory raises FileNotFoundError
+        with self.assertRaises(FileNotFoundError):
+            RealTaskDOMEnvironment(
+                manifest_path="data/manifests/real_mind2web_v1/manifest.json",
+                raw_mind2web_dir="nonexistent_raw_dir",
+                real_only=True,
+            )
+
+        # 3. Procedural mock tasks loaded only when real_only=False
+        fallback_env = RealTaskDOMEnvironment(
+            manifest_path=None,
+            raw_mind2web_dir=None,
+            raw_webarena_path=None,
+            real_only=False,
+        )
+        self.assertGreater(len(fallback_env.tasks), 0)
+        self.assertTrue(fallback_env.tasks[0].task_id.startswith("mock_"))
+        print("PASS: test_real_only_zero_mock_fallback - Enforced zero mock fallback in real mode")
+
 
 if __name__ == "__main__":
     unittest.main()

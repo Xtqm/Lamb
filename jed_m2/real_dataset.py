@@ -1661,3 +1661,126 @@ class RealTrajectoryCollator:
             jepa_obs_next=jepa_obs_next_tensor,
             images=None,
         )
+
+
+# ==============================================================================
+# 6. Generalization Split Partitioning & Disjointness Utilities
+# ==============================================================================
+
+def get_generalization_splits(
+    manifest_or_path: Union[str, Path, Dict[str, Any]],
+    train_split: str = "train",
+    test_split: str = "test",
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Partitions real web evaluation tasks into official Mind2Web generalization splits:
+    1. cross_task: Unseen tasks executed on seen websites (websites present in train split).
+    2. cross_website: Unseen websites belonging to seen domains (domains present in train split).
+    3. cross_domain: Completely unseen domains (domains absent from train split).
+
+    Args:
+        manifest_or_path: Manifest dictionary or filepath.
+        train_split: Name of the reference training split. Default "train".
+        test_split: Name of the evaluation split to partition. Default "test".
+
+    Returns:
+        Dict mapping split names ("cross_task", "cross_website", "cross_domain") to lists of task records.
+    """
+    if isinstance(manifest_or_path, (str, Path)):
+        manifest_path = Path(manifest_or_path)
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    else:
+        manifest = manifest_or_path
+
+    tasks = manifest.get("tasks", [])
+    if not isinstance(tasks, list):
+        raise ValueError("Manifest must contain a 'tasks' list.")
+
+    # Check if manifest explicitly defines generalization split memberships
+    explicit_gen: Dict[str, List[Dict[str, Any]]] = {
+        "cross_task": [],
+        "cross_website": [],
+        "cross_domain": [],
+    }
+    has_explicit = False
+    for t in tasks:
+        gen_tag = t.get("generalization_split") or (t.get("split") if t.get("split") in explicit_gen else None)
+        if gen_tag in explicit_gen:
+            explicit_gen[gen_tag].append(t)
+            has_explicit = True
+
+    if has_explicit and any(len(v) > 0 for v in explicit_gen.values()):
+        return explicit_gen
+
+    # Partition test_split tasks relative to train_split sites and domains
+    train_tasks = [t for t in tasks if t.get("split") == train_split]
+    test_tasks = [t for t in tasks if t.get("split") == test_split]
+
+    train_websites = {str(t.get("website", "")).strip().lower() for t in train_tasks if t.get("website")}
+    train_domains = {str(t.get("domain", "")).strip().lower() for t in train_tasks if t.get("domain")}
+
+    result: Dict[str, List[Dict[str, Any]]] = {
+        "cross_task": [],
+        "cross_website": [],
+        "cross_domain": [],
+    }
+
+    for t in test_tasks:
+        site = str(t.get("website", "")).strip().lower()
+        dom = str(t.get("domain", "")).strip().lower()
+
+        if site in train_websites:
+            result["cross_task"].append(t)
+        elif dom in train_domains:
+            result["cross_website"].append(t)
+        else:
+            result["cross_domain"].append(t)
+
+    return result
+
+
+def assert_website_disjointness(manifest_or_path: Union[str, Path, Dict[str, Any]]) -> None:
+    """
+    Programmatically asserts that website sets across train, val, and test splits are strictly pairwise disjoint.
+    Raises AssertionError if any website overlap or leakage is detected.
+    """
+    if isinstance(manifest_or_path, (str, Path)):
+        manifest_path = Path(manifest_or_path)
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    else:
+        manifest = manifest_or_path
+
+    tasks = manifest.get("tasks", [])
+    if not isinstance(tasks, list):
+        raise ValueError("Manifest must contain a 'tasks' list.")
+
+    train_sites = {
+        str(t["website"]).strip().lower()
+        for t in tasks
+        if t.get("split") == "train" and t.get("website")
+    }
+    val_sites = {
+        str(t["website"]).strip().lower()
+        for t in tasks
+        if t.get("split") == "val" and t.get("website")
+    }
+    test_sites = {
+        str(t["website"]).strip().lower()
+        for t in tasks
+        if t.get("split") == "test" and t.get("website")
+    }
+
+    train_val_overlap = train_sites & val_sites
+    train_test_overlap = train_sites & test_sites
+    val_test_overlap = val_sites & test_sites
+
+    if train_val_overlap:
+        raise AssertionError(f"Website leakage between train and val splits: {train_val_overlap}")
+    if train_test_overlap:
+        raise AssertionError(f"Website leakage between train and test splits: {train_test_overlap}")
+    if val_test_overlap:
+        raise AssertionError(f"Website leakage between val and test splits: {val_test_overlap}")

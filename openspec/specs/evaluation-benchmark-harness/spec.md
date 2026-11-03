@@ -81,7 +81,7 @@ The evaluation harness SHALL execute with gradient calculation disabled (`torch.
 - **THEN** peak allocated GPU memory does not exceed 6144.0 MB.
 
 ### Requirement: Site-Held-Out Real Trajectory Evaluation
-The system SHALL evaluate ablation checkpoints on real trajectory test manifests whose websites are disjoint from the corresponding training and validation manifests.
+The system SHALL evaluate policy and ablation checkpoints on real trajectory test manifests whose websites are disjoint from the corresponding training and validation manifests, and SHALL benchmark generalization across official cross-task, cross-website, and cross-domain splits without mock fixture contamination.
 
 #### Scenario: Evaluate a held-out real-site manifest
 - **WHEN** a checkpoint is evaluated on a real-data test manifest
@@ -90,6 +90,14 @@ The system SHALL evaluate ablation checkpoints on real trajectory test manifests
 #### Scenario: Invalid or leaking test manifest
 - **WHEN** a test manifest is missing, contains synthetic examples in a real-only evaluation, or shares a website or snapshot with training or validation
 - **THEN** the harness stops the real-data evaluation and identifies the manifest validation failure
+
+#### Scenario: Generalization split reporting across cross-task, cross-website, and cross-domain
+- **WHEN** benchmark evaluation is executed across official Mind2Web generalization splits
+- **THEN** the harness computes and outputs distinct metric rows for Cross-Task (unseen task, seen website), Cross-Website (unseen website, seen domain), and Cross-Domain (unseen domain), reporting the out-of-distribution generalization degradation
+
+#### Scenario: Elimination of mock templates from benchmark evaluations
+- **WHEN** evaluating under `--real_only` mode
+- **THEN** all environments and dataset loaders reject procedural mock fallbacks and assert 100% of evaluated turns originate from authentic web DOM snapshots
 
 ### Requirement: Evaluation Provenance and Protocol Separation
 The system SHALL identify the data source, split, website set, checkpoint, run identifier, and evaluation protocol for every reported result.

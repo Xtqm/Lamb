@@ -63,6 +63,8 @@ class RealTaskDefinition:
     initial_url: str
     turns: List[RealTaskTurn] = field(default_factory=list)
     max_turns: int = 8
+    website: str = ""
+    subdomain: str = ""
 
 
 # ==============================================================================
@@ -210,6 +212,9 @@ class RealTaskDOMEnvironment:
         self,
         raw_mind2web_dir: Optional[str] = "data/raw_mind2web",
         raw_webarena_path: Optional[str] = "data/raw_webarena/test.raw.json",
+        manifest_path: Optional[str] = "data/manifests/real_mind2web_v1/manifest.json",
+        split: str = "test",
+        real_only: bool = False,
         max_elements: int = 48,
         hidden_dim: int = 512,
         max_tasks: Optional[int] = None,
@@ -217,6 +222,9 @@ class RealTaskDOMEnvironment:
     ):
         self.raw_mind2web_dir = Path(raw_mind2web_dir) if raw_mind2web_dir else None
         self.raw_webarena_path = Path(raw_webarena_path) if raw_webarena_path else None
+        self.manifest_path = Path(manifest_path) if manifest_path else None
+        self.split = split
+        self.real_only = real_only
         self.max_elements = max_elements
         self.hidden_dim = hidden_dim
         self.max_tasks = max_tasks
@@ -269,54 +277,171 @@ class RealTaskDOMEnvironment:
         task_id = self.active_task.task_id if self.active_task else "real_web"
         domain = self.active_task.domain if self.active_task else "web"
         goal = self.active_task.goal if self.active_task else self.current_goal
+        website = getattr(self.active_task, "website", "") if self.active_task else ""
+        subdomain = getattr(self.active_task, "subdomain", "") if self.active_task else ""
 
         class ScenarioProxy:
-            def __init__(self, s_id: str, d: str, g: str):
+            def __init__(self, s_id: str, d: str, g: str, w: str = "", sd: str = ""):
                 self.scenario_id = s_id
                 self.domain = d
                 self.goal = g
-        return ScenarioProxy(task_id, domain, goal)
+                self.website = w
+                self.subdomain = sd
+        return ScenarioProxy(task_id, domain, goal, website, subdomain)
 
     def _load_tasks(self):
-        """Loads offline tasks from Mind2Web chunk files and WebArena dataset definitions."""
-        # 1. Ingest Mind2Web tasks
-        if self.raw_mind2web_dir and self.raw_mind2web_dir.exists():
-            chunk_files = sorted(list(self.raw_mind2web_dir.glob("*.json")))
-            for cf in chunk_files:
-                try:
-                    with open(cf, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    task_list = data if isinstance(data, list) else [data]
-                    for t_idx, item in enumerate(task_list):
-                        task = self._convert_mind2web_task(item, f"{cf.stem}_{t_idx}")
-                        if task and task.turns:
-                            self.tasks.append(task)
-                        if self.max_tasks and len(self.tasks) >= self.max_tasks:
-                            break
-                except Exception as e:
-                    logger.debug("Could not parse Mind2Web file %s: %s", cf, e)
-                if self.max_tasks and len(self.tasks) >= self.max_tasks:
-                    break
+        """Loads offline tasks from verified manifest or fallback datasets."""
+        self.tasks = []
 
-        # 2. Ingest WebArena tasks
-        if self.raw_webarena_path and self.raw_webarena_path.exists():
-            try:
-                with open(self.raw_webarena_path, "r", encoding="utf-8") as f:
-                    wa_data = json.load(f)
-                if isinstance(wa_data, list):
-                    for wa_item in wa_data:
-                        task = self._convert_webarena_task(wa_item)
-                        if task and task.turns:
-                            self.tasks.append(task)
-            except Exception as e:
-                logger.debug("Could not parse WebArena tasks: %s", e)
+        # 1. Manifest-driven loading (primary path for real evaluation)
+        if self.manifest_path is not None:
+            manifest_p = Path(self.manifest_path)
+            if not manifest_p.exists():
+                if self.real_only:
+                    raise FileNotFoundError(f"Real-only manifest not found: {self.manifest_path}")
+                logger.warning("Manifest not found at %s. Falling back to directory scan.", self.manifest_path)
+            else:
+                self._load_tasks_from_manifest(manifest_p)
+                if self.tasks:
+                    logger.info("RealTaskDOMEnvironment loaded %d tasks from manifest %s (split: %s).",
+                                len(self.tasks), manifest_p.name, self.split)
+                    return
+                elif self.real_only:
+                    raise ValueError(f"No tasks could be loaded from manifest {self.manifest_path} for split {self.split}")
+
+        # 2. Legacy directory scan (only if manifest_path was None or not found with real_only=False)
+        if not self.real_only:
+            if self.raw_mind2web_dir and self.raw_mind2web_dir.exists():
+                chunk_files = sorted(list(self.raw_mind2web_dir.glob("*.json")))
+                for cf in chunk_files:
+                    try:
+                        with open(cf, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        task_list = data if isinstance(data, list) else [data]
+                        for t_idx, item in enumerate(task_list):
+                            task = self._convert_mind2web_task(item, f"{cf.stem}_{t_idx}")
+                            if task and task.turns:
+                                self.tasks.append(task)
+                            if self.max_tasks and len(self.tasks) >= self.max_tasks:
+                                break
+                    except Exception as e:
+                        logger.debug("Could not parse Mind2Web file %s: %s", cf, e)
+                    if self.max_tasks and len(self.tasks) >= self.max_tasks:
+                        break
+
+            if self.raw_webarena_path and self.raw_webarena_path.exists():
+                try:
+                    with open(self.raw_webarena_path, "r", encoding="utf-8") as f:
+                        wa_data = json.load(f)
+                    if isinstance(wa_data, list):
+                        for wa_item in wa_data:
+                            task = self._convert_webarena_task(wa_item)
+                            if task and task.turns:
+                                self.tasks.append(task)
+                except Exception as e:
+                    logger.debug("Could not parse WebArena tasks: %s", e)
 
         # 3. Deterministic procedural fallback if no datasets available
         if not self.tasks:
+            if self.real_only:
+                raise ValueError("No real web tasks could be loaded in real_only mode.")
             logger.info("External datasets empty. Loading default procedural real-task templates.")
             self.tasks = self._get_fallback_tasks()
 
         logger.info("RealTaskDOMEnvironment loaded %d total real web tasks.", len(self.tasks))
+
+    def _load_tasks_from_manifest(self, manifest_path: Path):
+        """Loads tasks directly from verified manifest task entries."""
+        if not manifest_path.is_file():
+            if self.real_only:
+                raise FileNotFoundError(f"Real-only manifest not found: {manifest_path}")
+            return
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if self.real_only:
+            if manifest.get("schema") != "jed-m2.real-web-manifest.v1":
+                raise ValueError(f"Manifest schema mismatch: expected jed-m2.real-web-manifest.v1, got {manifest.get('schema')}")
+            if manifest.get("status") != "ready":
+                raise ValueError(f"Manifest status is not ready: {manifest.get('status')}")
+
+        manifest_hash = manifest.get("manifest_sha256", "unknown")
+        cache_dir = Path("data/real_trajectories_cache")
+        cache_file = cache_dir / f"real_task_defs_{manifest_hash[:16]}_{self.split}.pt"
+
+        if cache_file.exists() and not self.max_tasks:
+            try:
+                cached_tasks = torch.load(cache_file, map_location="cpu", weights_only=False)
+                if isinstance(cached_tasks, list) and len(cached_tasks) > 0:
+                    self.tasks = cached_tasks
+                    logger.info("Loaded %d real tasks from cache: %s", len(self.tasks), cache_file.name)
+                    return
+            except Exception as e:
+                logger.debug("Could not load from task def cache: %s", e)
+
+        tasks = manifest.get("tasks", [])
+        if self.split in ("cross_task", "cross_website", "cross_domain"):
+            from jed_m2.real_dataset import get_generalization_splits
+            gen_splits = get_generalization_splits(manifest)
+            target_records = gen_splits.get(self.split, [])
+        else:
+            target_records = [t for t in tasks if t.get("split") == self.split]
+
+        if not target_records:
+            if self.real_only:
+                raise ValueError(f"No task records found in manifest for split '{self.split}'")
+            return
+
+        if self.max_tasks:
+            target_records = target_records[:self.max_tasks]
+
+        if self.raw_mind2web_dir is None or not self.raw_mind2web_dir.exists():
+            if self.real_only:
+                raise FileNotFoundError(f"Raw Mind2Web directory not found: {self.raw_mind2web_dir}")
+            return
+
+        by_file: Dict[str, List[Dict[str, Any]]] = {}
+        for rec in target_records:
+            sf = rec.get("source_file", "")
+            if sf:
+                by_file.setdefault(sf, []).append(rec)
+
+        loaded_tasks: List[RealTaskDefinition] = []
+        for sf, records in by_file.items():
+            sf_path = self.raw_mind2web_dir / sf
+            if not sf_path.is_file():
+                if self.real_only:
+                    raise FileNotFoundError(f"Manifest source chunk file not found: {sf_path}")
+                continue
+
+            with sf_path.open("r", encoding="utf-8") as handle:
+                rows = json.load(handle)
+            if not isinstance(rows, list):
+                rows = [rows]
+
+            for rec in records:
+                idx = rec.get("record_index", -1)
+                if idx < 0 or idx >= len(rows):
+                    if self.real_only:
+                        raise ValueError(f"Record index {idx} out of range in {sf}")
+                    continue
+                raw_item = rows[idx]
+                task_def = self._convert_mind2web_task(raw_item, rec.get("annotation_id", f"{sf}_{idx}"))
+                if task_def and task_def.turns:
+                    task_def.website = rec.get("website", "")
+                    task_def.subdomain = rec.get("subdomain", "")
+                    loaded_tasks.append(task_def)
+
+        if not loaded_tasks and self.real_only:
+            raise ValueError(f"Could not load any real tasks for split '{self.split}'.")
+
+        self.tasks = loaded_tasks
+
+        if not self.max_tasks and len(self.tasks) == len(target_records):
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                torch.save(self.tasks, cache_file)
+            except Exception as e:
+                logger.debug("Could not cache RealTaskDefinition list: %s", e)
 
     def _convert_mind2web_task(self, item: Dict[str, Any], task_prefix: str) -> Optional[RealTaskDefinition]:
         """Converts raw Mind2Web JSON dictionary into RealTaskDefinition."""
