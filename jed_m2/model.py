@@ -492,7 +492,7 @@ class JEDM2Model(nn.Module):
 
         # JEPA World Model evaluation: connect directly to contextual backbone representations
         jepa_loss, jepa_metrics = None, None
-        if self.jepa is not None and action_t is not None and obs_next is not None:
+        if self.jepa is not None and action_t is not None and (obs_next is not None or visual_tokens_next is not None):
             # Derive contextual backbone representation directly from recurrent stack
             if h_text.ndim == 3:
                 h_jepa_in = h_text.mean(dim=1)
@@ -501,10 +501,23 @@ class JEDM2Model(nn.Module):
 
             vt_t = visual_tokens_t if visual_tokens_t is not None else visual_tokens
             vt_next = visual_tokens_next
+
+            # Align JEPA Target Representation:
+            # Use actual pooled visual patch tokens or embedded token representations of s_{t+1}
+            # rather than the static MD5 word-hash vector obs_features.
+            if vt_next is not None:
+                obs_target = vt_next.mean(dim=1) if vt_next.ndim == 3 else vt_next
+            elif obs_next is not None and hasattr(self, "tok_embeddings") and obs_next.dtype in (torch.int64, torch.int32):
+                obs_target = self.tok_embeddings(obs_next).mean(dim=1)
+            elif obs_next is not None:
+                obs_target = obs_next
+            else:
+                obs_target = h_jepa_in.detach()
+
             _, _, jepa_loss, jepa_metrics = self.jepa(
                 h_jepa_in,
                 action_t,
-                obs_next,
+                obs_target,
                 visual_tokens_t=vt_t,
                 visual_tokens_next=vt_next,
             )
