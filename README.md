@@ -36,7 +36,7 @@ Unlike standard web agents that rely on multi-billion parameter cloud LLMs (7Bâ€
 ### 1. Installation
 Clone the repository and install dependencies (requires Python 3.10+ and PyTorch):
 ```bash
-git clone https://github.com/TheQMechanic/Lamb.git
+git clone https://github.com/Xtqm/Lamb.git
 cd Lamb
 pip install torch torchvision numpy
 ```
@@ -127,7 +127,7 @@ Read the full 9-page research manuscript:
   author    = {The Q Mechanic AI Research Team},
   journal   = {Technical Report},
   year      = {2026},
-  url       = {https://github.com/TheQMechanic/Lamb}
+  url       = {https://github.com/Xtqm/Lamb}
 }
 ```
 

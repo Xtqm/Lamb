@@ -2,7 +2,7 @@
 
 **Author:** Autonomous Agent Architecture Team  
 **Date:** November 2026  
-**Repository:** `https://github.com/TheQMechanic/Lamb`  
+**Repository:** `https://github.com/Xtqm/Lamb`  
 **Target Hardware Envelope:** Consumer Edge Devices (NVIDIA GeForce RTX 5060 Laptop GPU, 8 GB GDDR7, $< 2.0\text{ GB}$ Peak Inference VRAM)
 
 ---
