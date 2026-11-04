@@ -71,6 +71,10 @@ data/cache/
 *.parquet.gzip
 data/raw_snapshots/
 
+# Agent & OpenSpec local workspace workflows
+openspec/
+.agents/
+
 
 
 
