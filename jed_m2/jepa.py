@@ -158,6 +158,9 @@ class LatentPredictor(nn.Module):
         # Discrete action embedding table for discrete token actions
         self.action_embed = nn.Embedding(config.vocab_size, self.action_dim)
 
+        # Spatial coordinate projection for grounded action conditioning (x, y) in [0, 1]
+        self.coord_proj = nn.Linear(2, self.action_dim, bias=False)
+
         # Predictor MLP with residual transition dynamics
         # [B, latent_dim + action_dim] -> [B, intermediate_dim]
         self.fc1 = nn.Linear(self.latent_dim + self.action_dim, intermediate_dim, bias=False)
@@ -181,19 +184,31 @@ class LatentPredictor(nn.Module):
                 f"Action tensor last dim {action.shape[-1]} does not match action_dim {self.action_dim}"
             )
 
-    def forward(self, z_t: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        z_t: torch.Tensor,
+        action: torch.Tensor,
+        coords: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        Predict next latent representation conditioned on current state and action.
+        Predict next latent representation conditioned on current state, action, and optional coordinates.
 
         Args:
             z_t: Current latent state tensor of shape [B, D_latent] or [B, L, D_latent].
             action: Action tensor (discrete IDs or dense features [B, D_action] or [B, L, D_action]).
+            coords: Optional continuous normalized coordinates [B, 2] or [B, L, 2].
 
         Returns:
             Predicted next latent state tensor z_hat_{t+1} of shape [B, D_latent] or [B, L, D_latent].
         """
         # Embed/project action: [..., action_dim]
         a = self._prepare_action(action)
+
+        if coords is not None:
+            c = coords.to(device=a.device, dtype=a.dtype)
+            if c.ndim == 1 and a.ndim == 2:
+                c = c.unsqueeze(0)
+            a = a + self.coord_proj(c)
 
         # Concatenate latent state and action: [..., latent_dim + action_dim]
         za = torch.cat([z_t, a], dim=-1)
@@ -248,9 +263,14 @@ class JEPAWorldModel(nn.Module):
         """Encodes target observation using the detached EMA target encoder."""
         return self.target_encoder(obs_next, visual_tokens=visual_tokens_next)
 
-    def predict(self, z_t: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        """Predicts expected next latent state given current state and action."""
-        return self.predictor(z_t, action)
+    def predict(
+        self,
+        z_t: torch.Tensor,
+        action: torch.Tensor,
+        coords: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Predicts expected next latent state given current state, action, and optional coordinates."""
+        return self.predictor(z_t, action, coords=coords)
 
     def compute_loss(
         self, z_pred: torch.Tensor, z_target: torch.Tensor

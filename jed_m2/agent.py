@@ -15,6 +15,7 @@ STRICT BUILD RULE: 100% native PyTorch without external compiled C++/CUDA packag
 """
 
 from dataclasses import dataclass, field
+import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
@@ -168,6 +169,7 @@ class JEDM2Agent:
         self.turn_count: int = 0
         self.cached_prompt_hidden: Optional[torch.Tensor] = None
         self.cached_prompt_ids: Optional[torch.Tensor] = None
+        self.latent_history: List[torch.Tensor] = []
 
     def reset(self) -> None:
         """
@@ -177,6 +179,7 @@ class JEDM2Agent:
         self.recurrent_states = None
         self.current_pos = 0
         self.history.clear()
+        self.latent_history.clear()
         self.turn_count = 0
         self.cached_prompt_hidden = None
         self.cached_prompt_ids = None
@@ -267,6 +270,7 @@ class JEDM2Agent:
         self,
         z_t: torch.Tensor,
         action: Union[int, ActionType, torch.Tensor],
+        coords: Optional[Union[Tuple[float, float], torch.Tensor]] = None,
     ) -> torch.Tensor:
         """
         Predicts expected next abstract state z_hat_{t+1} using the JEPA world model predictor.
@@ -274,6 +278,7 @@ class JEDM2Agent:
         Args:
             z_t: Current latent state tensor of shape [1, D_latent] or [D_latent].
             action: Integer action type ID, ActionType enum, or action tensor.
+            coords: Optional continuous normalized screen coordinates (x, y) or tensor [B, 2].
 
         Returns:
             Predicted next latent state tensor z_hat_{t+1} of shape [1, D_latent].
@@ -293,12 +298,21 @@ class JEDM2Agent:
         else:
             raise TypeError(f"Unsupported action type: {type(action)}")
 
+        coords_tensor: Optional[torch.Tensor] = None
+        if coords is not None:
+            if isinstance(coords, (tuple, list)):
+                coords_tensor = torch.tensor([coords], device=self.device, dtype=self.dtype)
+            elif isinstance(coords, torch.Tensor):
+                coords_tensor = coords.to(device=self.device, dtype=self.dtype)
+                if coords_tensor.ndim == 1:
+                    coords_tensor = coords_tensor.unsqueeze(0)
+
         if z_t.ndim == 1:
             z_t = z_t.unsqueeze(0)
         z_t = z_t.to(device=self.device, dtype=self.dtype)
 
         with torch.no_grad():
-            z_next = self.model.jepa.predict(z_t, act_tensor)
+            z_next = self.model.jepa.predict(z_t, act_tensor, coords=coords_tensor)
         return z_next
 
     def evaluate_action_candidates(
@@ -339,6 +353,204 @@ class JEDM2Agent:
             distances[act_id] = cos_dist
 
         return distances
+
+    def evaluate_grounded_candidates(
+        self,
+        z_t: torch.Tensor,
+        z_goal: torch.Tensor,
+        action_logits: torch.Tensor,
+        raw_coords: Tuple[float, float],
+        candidate_elements: Optional[List[Any]] = None,
+        candidate_actions: Optional[List[int]] = None,
+        drift_threshold: float = 0.15,
+        loop_threshold: float = 0.05,
+        plan_lambda: float = 1.0,
+        spatial_beta: float = 2.0,
+    ) -> Tuple[int, Tuple[float, float], Dict[str, Any]]:
+        """
+        Evaluates candidate actions grounded on interactable DOM elements using 1-step JEPA lookahead,
+        pruning dead-ends (goal drift) and cyclic navigation loops, and scoring candidates via MPC value fusion.
+
+        Args:
+            z_t: Current latent state [1, D_latent].
+            z_goal: Task goal latent state [1, D_latent].
+            action_logits: Unnormalized action primitive logits [num_action_types] from policy head.
+            raw_coords: Predicted continuous coordinates (x, y) in [0, 1].
+            candidate_elements: Optional list of interactable DOM candidate elements or dicts.
+            candidate_actions: Optional list of action type IDs to consider.
+            drift_threshold: Max allowed increase in goal distance before pruning (dead-end filter).
+            loop_threshold: Min allowed distance to previous trajectory states before pruning (loop filter).
+            plan_lambda: Goal distance weight in MPC score.
+            spatial_beta: Coordinate distance penalty weight in MPC score.
+
+        Returns:
+            Tuple of:
+            - selected_action_id: Integer action primitive ID.
+            - selected_coords: Chosen normalized continuous coordinates (x, y).
+            - planning_metadata: Dictionary of planning metrics, candidate scores, and pruning reasons.
+        """
+        if getattr(self.model, "jepa", None) is None:
+            raise RuntimeError("Model does not have a configured JEPA world model.")
+
+        if z_t.ndim == 1:
+            z_t = z_t.unsqueeze(0)
+        z_t = z_t.to(device=self.device, dtype=self.dtype)
+
+        if z_goal.ndim == 1:
+            z_goal = z_goal.unsqueeze(0)
+        z_goal = z_goal.to(device=self.device, dtype=self.dtype)
+
+        curr_goal_dist = float(1.0 - F.cosine_similarity(z_t, z_goal, dim=-1).clamp(-1.0, 1.0).item())
+
+        if action_logits.ndim > 1:
+            logits_1d = action_logits.squeeze(0)
+        else:
+            logits_1d = action_logits
+
+        top_act_id = int(torch.argmax(logits_1d, dim=-1).item())
+
+        # Determine candidate action types
+        if candidate_actions is not None:
+            cand_act_ids = list(candidate_actions)
+        else:
+            top_k_indices = torch.topk(logits_1d, k=min(3, logits_1d.shape[-1])).indices.tolist()
+            cand_act_ids = [top_act_id]
+            for idx in top_k_indices:
+                if idx not in cand_act_ids and idx in (
+                    ActionType.CLICK.value,
+                    ActionType.TYPE.value,
+                    ActionType.SCROLL.value,
+                    ActionType.NAVIGATE.value,
+                    ActionType.FINISH.value,
+                ):
+                    cand_act_ids.append(idx)
+
+        # Extract candidate element centers
+        element_centers: List[Tuple[float, float]] = []
+        if candidate_elements:
+            for el in candidate_elements:
+                c = _extract_element_center(el)
+                if c is not None and 0.0 <= c[0] <= 1.0 and 0.0 <= c[1] <= 1.0:
+                    element_centers.append(c)
+
+        # Sort candidate centers by distance to raw_coords and take top 8
+        rx, ry = raw_coords
+        if element_centers:
+            element_centers.sort(key=lambda pt: (pt[0] - rx) ** 2 + (pt[1] - ry) ** 2)
+            element_centers = element_centers[:8]
+
+        # Always include the raw predicted coordinates as a candidate target location
+        all_centers = [raw_coords]
+        for pt in element_centers:
+            if (pt[0] - rx) ** 2 + (pt[1] - ry) ** 2 > 1e-5:
+                all_centers.append(pt)
+
+        # Construct candidate action-coordinate pairs
+        cand_pairs: List[Tuple[int, Tuple[float, float]]] = []
+        for act_id in cand_act_ids:
+            if act_id in (ActionType.FINISH.value, ActionType.NAVIGATE.value):
+                cand_pairs.append((act_id, (0.0, 0.0)))
+            else:
+                for pt in all_centers:
+                    cand_pairs.append((act_id, pt))
+
+        if not cand_pairs:
+            return top_act_id, raw_coords, {"status": "no_candidates", "current_goal_dist": curr_goal_dist}
+
+        # Vectorized 1-step lookahead rollout in JEPA latent space
+        M = len(cand_pairs)
+        z_batch = z_t.expand(M, -1)
+        act_tensor = torch.tensor([p[0] for p in cand_pairs], device=self.device, dtype=torch.long)
+        coords_tensor = torch.tensor([p[1] for p in cand_pairs], device=self.device, dtype=self.dtype)
+
+        with torch.no_grad():
+            z_pred_batch = self.model.jepa.predict(z_batch, act_tensor, coords=coords_tensor)
+
+        # Compute goal cosine distances for all candidates
+        sims = F.cosine_similarity(z_pred_batch, z_goal.expand(M, -1), dim=-1).clamp(-1.0, 1.0)
+        goal_dists = (1.0 - sims).tolist()
+
+        # Check loop distance against historical latent states
+        hist_tensors = [h for h in self.latent_history[-8:] if h is not None]
+        if hist_tensors:
+            hist_stack = torch.cat([h if h.ndim == 2 else h.unsqueeze(0) for h in hist_tensors], dim=0)
+            hist_stack = hist_stack.to(device=self.device, dtype=self.dtype)
+            hist_sims = F.cosine_similarity(
+                z_pred_batch.unsqueeze(1), hist_stack.unsqueeze(0), dim=-1
+            ).clamp(-1.0, 1.0)
+            min_loop_dists = (1.0 - hist_sims.max(dim=-1).values).tolist()
+        else:
+            min_loop_dists = [1.0] * M
+
+        # Evaluate pruning and score candidates
+        details: List[Dict[str, Any]] = []
+        valid_candidates: List[Tuple[float, int, Tuple[float, float]]] = []
+        all_candidates_scored: List[Tuple[float, int, Tuple[float, float]]] = []
+
+        for m in range(M):
+            act_id, (cx, cy) = cand_pairs[m]
+            act_name = ActionType(act_id).name if 0 <= act_id < len(ActionType) else str(act_id)
+            g_dist = float(goal_dists[m])
+            loop_dist = float(min_loop_dists[m])
+            drift = g_dist - curr_goal_dist
+
+            if act_id in (ActionType.FINISH.value, ActionType.NAVIGATE.value):
+                spatial_dist = 0.0
+            else:
+                spatial_dist = float(math.sqrt((cx - rx) ** 2 + (cy - ry) ** 2))
+
+            logit_val = float(logits_1d[act_id].item())
+            score = logit_val - spatial_beta * spatial_dist - plan_lambda * g_dist
+
+            pruned = False
+            prune_reason = ""
+            if drift > drift_threshold:
+                pruned = True
+                prune_reason = f"drift ({drift:.3f} > {drift_threshold:.3f})"
+            elif loop_dist < loop_threshold:
+                pruned = True
+                prune_reason = f"loop ({loop_dist:.3f} < {loop_threshold:.3f})"
+
+            detail = {
+                "action": act_name,
+                "action_id": act_id,
+                "coords": (cx, cy),
+                "goal_dist": g_dist,
+                "loop_dist": loop_dist,
+                "drift": drift,
+                "score": score,
+                "pruned": pruned,
+                "prune_reason": prune_reason,
+            }
+            details.append(detail)
+            all_candidates_scored.append((score, act_id, (cx, cy)))
+
+            if not pruned:
+                valid_candidates.append((score, act_id, (cx, cy)))
+
+        # Selection with fallback
+        if valid_candidates:
+            valid_candidates.sort(key=lambda x: x[0], reverse=True)
+            best_score, sel_act_id, sel_coords = valid_candidates[0]
+            fallback_used = False
+        else:
+            # Safe fallback: select candidate with highest score
+            all_candidates_scored.sort(key=lambda x: x[0], reverse=True)
+            best_score, sel_act_id, sel_coords = all_candidates_scored[0]
+            fallback_used = True
+
+        metadata = {
+            "current_goal_dist": curr_goal_dist,
+            "total_candidates": M,
+            "valid_candidates": len(valid_candidates),
+            "fallback_used": fallback_used,
+            "selected_action": ActionType(sel_act_id).name,
+            "selected_coords": sel_coords,
+            "selected_score": best_score,
+            "candidates": details,
+        }
+
+        return sel_act_id, sel_coords, metadata
 
     def act(
         self,
@@ -450,7 +662,13 @@ class JEDM2Agent:
         )
         gate_prob = float(torch.sigmoid(action_output.gate_logits).item())
 
-        # Action primitive decoding (with optional JEPA latent rollout planning)
+        # Spatial continuous screen coordinates in [0, 1]
+        raw_coords = action_output.coordinates.squeeze(0)  # [2]
+        coord_x = float(raw_coords[0].clamp(0.0, 1.0).item())
+        coord_y = float(raw_coords[1].clamp(0.0, 1.0).item())
+        raw_coords_tuple = (coord_x, coord_y)
+
+        # Action primitive and spatial decoding (with optional JEPA grounded MPC planning)
         should_plan = self.use_jepa_planning if use_jepa_planning is None else use_jepa_planning
         plan_lambda = self.jepa_planning_lambda if jepa_planning_lambda is None else jepa_planning_lambda
         jepa_planning_scores: Optional[Dict[str, float]] = None
@@ -474,56 +692,55 @@ class JEDM2Agent:
             else:
                 z_goal = z_t
 
-            candidate_ids = [
-                ActionType.CLICK.value,
-                ActionType.TYPE.value,
-                ActionType.SCROLL.value,
-                ActionType.NAVIGATE.value,
-            ]
-            cand_distances = self.evaluate_action_candidates(z_t, z_goal, candidate_ids)
+            # Execute grounded candidate evaluation with dead-end pruning and loop elimination
+            sel_act_id, sel_coords, planning_meta = self.evaluate_grounded_candidates(
+                z_t=z_t,
+                z_goal=z_goal,
+                action_logits=action_output.action_type_logits.squeeze(0),
+                raw_coords=raw_coords_tuple,
+                candidate_elements=candidate_elements,
+                plan_lambda=plan_lambda,
+            )
 
-            # Re-rank candidate action logits: score = logit - lambda * distance
-            action_logits = action_output.action_type_logits.squeeze(0).clone()
-            jepa_planning_scores = {}
-            for act_id, dist in cand_distances.items():
-                act_name = ActionType(act_id).name
-                score = float(action_logits[act_id].item() - plan_lambda * dist)
-                action_logits[act_id] = score
-                jepa_planning_scores[act_name] = score
+            action_type_id = sel_act_id
+            coords = sel_coords
+            jepa_planning_scores = {
+                f"{c['action']}@{c['coords'][0]:.2f},{c['coords'][1]:.2f}": float(c["score"])
+                for c in planning_meta.get("candidates", [])
+            }
+            jepa_planning_scores["selected_score"] = float(planning_meta.get("selected_score", 0.0))
+            jepa_planning_scores["fallback_used"] = 1.0 if planning_meta.get("fallback_used", False) else 0.0
 
-            action_type_id = int(torch.argmax(action_logits, dim=-1).item())
+            # Record current latent state in history for future loop elimination
+            self.latent_history.append(z_t.detach())
+            if len(self.latent_history) > 16:
+                self.latent_history.pop(0)
         else:
             action_type_id = int(torch.argmax(action_output.action_type_logits, dim=-1).item())
 
+            # Candidate bounding box snapping
+            should_snap = self.snap_coordinates_to_candidates if snap_coordinates is None else snap_coordinates
+            snap_dist_limit = self.max_snap_distance if max_snap_distance is None else max_snap_distance
+
+            coords = raw_coords_tuple
+            if should_snap and candidate_elements and ActionType(action_type_id) in (ActionType.CLICK, ActionType.SELECT):
+                valid_candidates = []
+                for el in candidate_elements:
+                    if getattr(el, "has_bbox", True):
+                        c = _extract_element_center(el)
+                        if c is not None:
+                            valid_candidates.append(c)
+
+                if valid_candidates:
+                    best_center = min(
+                        valid_candidates,
+                        key=lambda c: (c[0] - coord_x) ** 2 + (c[1] - coord_y) ** 2,
+                    )
+                    dist_sq = (best_center[0] - coord_x) ** 2 + (best_center[1] - coord_y) ** 2
+                    if snap_dist_limit is None or (dist_sq <= snap_dist_limit ** 2):
+                        coords = (float(best_center[0]), float(best_center[1]))
+
         action_type = ActionType(action_type_id)
-
-        # Spatial continuous screen coordinates in [0, 1]
-        raw_coords = action_output.coordinates.squeeze(0)  # [2]
-        coord_x = float(raw_coords[0].clamp(0.0, 1.0).item())
-        coord_y = float(raw_coords[1].clamp(0.0, 1.0).item())
-        raw_coords_tuple = (coord_x, coord_y)
-
-        # Candidate bounding box snapping
-        should_snap = self.snap_coordinates_to_candidates if snap_coordinates is None else snap_coordinates
-        snap_dist_limit = self.max_snap_distance if max_snap_distance is None else max_snap_distance
-
-        coords = raw_coords_tuple
-        if should_snap and candidate_elements and action_type in (ActionType.CLICK, ActionType.SELECT):
-            valid_candidates = []
-            for el in candidate_elements:
-                if getattr(el, "has_bbox", True):
-                    c = _extract_element_center(el)
-                    if c is not None:
-                        valid_candidates.append(c)
-
-            if valid_candidates:
-                best_center = min(
-                    valid_candidates,
-                    key=lambda c: (c[0] - coord_x) ** 2 + (c[1] - coord_y) ** 2,
-                )
-                dist_sq = (best_center[0] - coord_x) ** 2 + (best_center[1] - coord_y) ** 2
-                if snap_dist_limit is None or (dist_sq <= snap_dist_limit ** 2):
-                    coords = (float(best_center[0]), float(best_center[1]))
 
         # Argument payload decoding (autoregressive unrolling for typing actions)
         if action_type in (ActionType.TYPE, ActionType.SELECT):

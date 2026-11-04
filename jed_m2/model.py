@@ -678,6 +678,30 @@ class JEDM2Model(nn.Module):
             return last_lm_logits, last_action_output, new_states, h
         return last_lm_logits, last_action_output, new_states
 
+    def predict_next_latent_state(
+        self,
+        z_t: torch.Tensor,
+        action: Union[int, torch.Tensor],
+        coords: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Predicts expected next latent state z_hat_{t+1} using JEPA world model.
+
+        Args:
+            z_t: Current latent state tensor [B, D_latent].
+            action: Action primitive ID or action tensor [B, action_dim].
+            coords: Optional spatial coordinates [B, 2].
+
+        Returns:
+            Predicted next latent state tensor z_hat_{t+1} [B, D_latent].
+        """
+        if self.jepa is None:
+            raise RuntimeError("Model does not have a configured JEPA world model.")
+        if isinstance(action, int):
+            device = next(self.parameters()).device
+            action = torch.tensor([action], device=device, dtype=torch.long)
+        return self.jepa.predict(z_t, action, coords=coords)
+
     def count_parameters(self) -> Dict[str, int]:
         """
         Computes total, trainable, and active parameters per token.
