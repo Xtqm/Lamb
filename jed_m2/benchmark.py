@@ -865,12 +865,18 @@ def evaluate_offline_dataset(
                 break
             t_start = time.perf_counter()
 
+            turn_elements = (
+                getattr(turn, "dom_elements", None)
+                or getattr(turn, "interactive_elements", None)
+                or getattr(turn, "elements", None)
+            )
+
             # Execute agent step
             agent_out: AgentStepOutput = agent.act(
                 obs_text=turn.obs_text,
                 obs_features=turn.obs_features,
                 screenshot=getattr(turn, "screenshot", None),
-                candidate_elements=getattr(turn, "elements", None),
+                candidate_elements=turn_elements,
             )
 
             latency_ms = (time.perf_counter() - t_start) * 1000.0
@@ -882,7 +888,7 @@ def evaluate_offline_dataset(
 
             # Find matching UI element bbox if available
             target_bbox: Optional[Tuple[float, float, float, float]] = None
-            elements = getattr(turn, "dom_elements", None) or getattr(turn, "interactive_elements", [])
+            elements = turn_elements or []
             for el in elements:
                 if getattr(el, "bbox", None) is not None and len(el.bbox) == 4:
                     # If coordinate falls inside bbox, use as target
