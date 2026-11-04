@@ -211,9 +211,14 @@ class JEDM2CompositeLoss(nn.Module):
         if shift_arg_mask.any():
             valid_arg_logits = shift_arg_logits[shift_arg_mask]  # [N_args, vocab_size]
             valid_arg_targets = shift_arg_labels[shift_arg_mask]  # [N_args]
-            raw_loss_arg = F.cross_entropy(
-                valid_arg_logits, valid_arg_targets, ignore_index=cfg.ignore_index
-            )
+            if getattr(model_output.action_output, "argument_probs", None) is not None:
+                raw_loss_arg = F.nll_loss(
+                    valid_arg_logits, valid_arg_targets, ignore_index=cfg.ignore_index
+                )
+            else:
+                raw_loss_arg = F.cross_entropy(
+                    valid_arg_logits, valid_arg_targets, ignore_index=cfg.ignore_index
+                )
             # Scale-normalize cross-entropy by log(vocab_size) to align with Huber and discrete CE magnitudes
             if getattr(cfg, "normalize_token_loss", True):
                 loss_arg = raw_loss_arg / math.log(max(2, vocab_size))

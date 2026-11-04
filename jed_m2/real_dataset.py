@@ -1456,6 +1456,7 @@ class RealTrajectoryCollator:
         all_jepa_obs_t: List[torch.Tensor] = []
         all_jepa_action_t: List[int] = []
         all_jepa_obs_next: List[torch.Tensor] = []
+        all_prompt_tokens: List[List[int]] = []
 
         for sample in samples:
             seq_tokens: List[int] = [self.tokenizer.BOS_TOKEN_ID]
@@ -1468,6 +1469,12 @@ class RealTrajectoryCollator:
             sample_act_types: List[int] = []
             sample_act_masks: List[bool] = []
             sample_coords: List[Tuple[float, float]] = []
+
+            # Extract prompt context tokens for pointer-generator copy head
+            goal_tokens = self.tokenizer.encode(f"Goal: {sample.goal}")
+            first_obs = f"<obs> {sample.turns[0].obs_text} </obs>" if sample.turns else ""
+            obs_tokens = self.tokenizer.encode(first_obs)
+            all_prompt_tokens.append((goal_tokens + obs_tokens)[:256] or [self.tokenizer.BOS_TOKEN_ID])
 
             # Encode task goal
             goal_tokens = self.tokenizer.encode(f"Goal: {sample.goal}")
@@ -1644,6 +1651,15 @@ class RealTrajectoryCollator:
         jepa_action_t_tensor = torch.tensor([all_jepa_action_t[i] for i in jepa_indices], dtype=torch.long)
         jepa_obs_next_tensor = torch.stack([all_jepa_obs_next[i] for i in jepa_indices])
 
+        # Pad prompt tokens for pointer-generator copy supervision
+        max_prompt_len = max(max(len(p) for p in all_prompt_tokens), 1)
+        prompt_ids_tensor = torch.full((batch_size, max_prompt_len), self.tokenizer.PAD_TOKEN_ID, dtype=torch.long)
+        prompt_mask_tensor = torch.zeros((batch_size, max_prompt_len), dtype=torch.bool)
+        for b in range(batch_size):
+            p_len = len(all_prompt_tokens[b])
+            prompt_ids_tensor[b, :p_len] = torch.tensor(all_prompt_tokens[b], dtype=torch.long)
+            prompt_mask_tensor[b, :p_len] = True
+
         return TrajectoryBatch(
             input_ids=input_ids_tensor,
             attention_mask=attn_bias,
@@ -1660,6 +1676,8 @@ class RealTrajectoryCollator:
             jepa_action_t=jepa_action_t_tensor,
             jepa_obs_next=jepa_obs_next_tensor,
             images=None,
+            prompt_token_ids=prompt_ids_tensor,
+            prompt_mask=prompt_mask_tensor,
         )
 
 

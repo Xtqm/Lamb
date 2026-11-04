@@ -397,6 +397,9 @@ class JEDM2Model(nn.Module):
         visual_tokens_t: Optional[torch.Tensor] = None,
         visual_tokens_next: Optional[torch.Tensor] = None,
         return_all_tokens: bool = False,
+        prompt_hidden: Optional[torch.Tensor] = None,
+        prompt_ids: Optional[torch.Tensor] = None,
+        prompt_mask: Optional[torch.Tensor] = None,
     ) -> JEDM2Output:
         """
         Sequence-parallel forward pass for training and verification.
@@ -487,8 +490,14 @@ class JEDM2Model(nn.Module):
         # System 2: Autoregressive LM rationale logits: [B, S_t, vocab_size]
         lm_logits = self.lm_head(h_text)
 
-        # System 1: Dual-system action heads with visual grounding
-        action_output = self.action_head(h_text, visual_tokens=visual_tokens)
+        # System 1: Dual-system action heads with visual grounding and prompt conditioning
+        action_output = self.action_head(
+            h_text,
+            visual_tokens=visual_tokens,
+            prompt_hidden=prompt_hidden,
+            prompt_ids=prompt_ids,
+            prompt_mask=prompt_mask,
+        )
 
         # JEPA World Model evaluation: connect directly to contextual backbone representations
         jepa_loss, jepa_metrics = None, None
@@ -538,12 +547,15 @@ class JEDM2Model(nn.Module):
         states: Optional[List[Tuple[Any, Any, Any]]] = None,
         pos: int = 0,
         visual_tokens: Optional[torch.Tensor] = None,
+        prompt_hidden: Optional[torch.Tensor] = None,
+        prompt_ids: Optional[torch.Tensor] = None,
+        prompt_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, ActionOutput, List[Tuple[Any, Any, Any]]]:
         """
         Autoregressive multi-step recurrent rollout step.
         Propagates a single token through all stacked layers while preserving
         layer-wise Mamba rolling state buffers and MLA dynamic KV caches.
-        Supports visual grounding on visual patch tokens.
+        Supports visual grounding on visual patch tokens and prompt-conditioned argument decoding.
 
         Args:
             token_id_or_embed: Single token ID tensor of shape [B] or [B, 1],
@@ -552,6 +564,9 @@ class JEDM2Model(nn.Module):
                     [(ssm_state_l, conv_state_l, kv_cache_l), ...] for l in 0..num_layers-1.
             pos: Current sequence position (0-indexed).
             visual_tokens: Optional visual patch tokens [B, N_v, hidden_dim] for coordinate grounding.
+            prompt_hidden: Optional prompt sequence hidden representations [B, S_p, hidden_dim].
+            prompt_ids: Optional prompt token IDs [B, S_p].
+            prompt_mask: Optional prompt boolean mask [B, S_p].
 
         Returns:
             Tuple of:
@@ -587,8 +602,14 @@ class JEDM2Model(nn.Module):
         # System 2: LM Logits at timestep t: [B, vocab_size]
         lm_logits_t = self.lm_head(h_t)
 
-        # System 1: Action outputs at timestep t with optional visual grounding
-        action_output_t = self.action_head(h_t, visual_tokens=visual_tokens)
+        # System 1: Action outputs at timestep t with optional visual grounding and prompt conditioning
+        action_output_t = self.action_head(
+            h_t,
+            visual_tokens=visual_tokens,
+            prompt_hidden=prompt_hidden,
+            prompt_ids=prompt_ids,
+            prompt_mask=prompt_mask,
+        )
 
         return lm_logits_t, action_output_t, next_states
 
@@ -598,7 +619,11 @@ class JEDM2Model(nn.Module):
         states: Optional[List[Tuple[Any, Any, Any]]] = None,
         start_pos: int = 0,
         visual_tokens: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, ActionOutput, List[Tuple[Any, Any, Any]]]:
+        return_prompt_hidden: bool = False,
+    ) -> Union[
+        Tuple[torch.Tensor, ActionOutput, List[Tuple[Any, Any, Any]]],
+        Tuple[torch.Tensor, ActionOutput, List[Tuple[Any, Any, Any]], torch.Tensor],
+    ]:
         """
         Parallel prompt prefill across all stacked layers.
         Ingests the full token prompt sequence [B, seq_len] in a single parallel
@@ -611,12 +636,14 @@ class JEDM2Model(nn.Module):
             states: Optional list of per-layer state tuples from previous turns.
             start_pos: Sequence position offset (default 0).
             visual_tokens: Optional visual patch tokens [B, N_v, hidden_dim].
+            return_prompt_hidden: If True, also returns normalized prompt sequence hidden representations [B, seq_len, D].
 
         Returns:
             Tuple of:
             - last_lm_logits: Vocabulary logits for final prompt token [B, vocab_size].
             - last_action_output: ActionOutput container for final prompt token.
             - new_states: List of per-layer state tuples to seed step(...) rollouts.
+            - (optional) prompt_hidden: Full prompt hidden representations if return_prompt_hidden=True.
         """
         if input_ids.ndim == 1:
             input_ids = input_ids.unsqueeze(0)  # [1, seq_len]
@@ -639,9 +666,16 @@ class JEDM2Model(nn.Module):
         # System 2: LM Logits at final prompt position
         last_lm_logits = self.lm_head(h_last)  # [B, vocab_size]
 
-        # System 1: Action output at final prompt position
-        last_action_output = self.action_head(h_last, visual_tokens=visual_tokens)
+        # System 1: Action output at final prompt position with prompt conditioning
+        last_action_output = self.action_head(
+            h_last,
+            visual_tokens=visual_tokens,
+            prompt_hidden=h,
+            prompt_ids=input_ids,
+        )
 
+        if return_prompt_hidden:
+            return last_lm_logits, last_action_output, new_states, h
         return last_lm_logits, last_action_output, new_states
 
     def count_parameters(self) -> Dict[str, int]:

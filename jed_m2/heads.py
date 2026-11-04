@@ -10,6 +10,7 @@ Implements System 1 action emission heads:
 - NativeActionHead: Composite module coordinating all four heads.
 """
 
+import math
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Dict, Optional, Tuple
@@ -45,15 +46,25 @@ class ActionOutput:
     action_type_logits: torch.Tensor
     coordinates: torch.Tensor
     argument_logits: torch.Tensor
+    pointer_probs: Optional[torch.Tensor] = None
+    alpha: Optional[torch.Tensor] = None
+    argument_probs: Optional[torch.Tensor] = None
 
-    def to_dict(self) -> Dict[str, torch.Tensor]:
+    def to_dict(self) -> Dict[str, Any]:
         """Convert container to standard dictionary."""
-        return {
+        d = {
             "gate_logits": self.gate_logits,
             "action_type_logits": self.action_type_logits,
             "coordinates": self.coordinates,
             "argument_logits": self.argument_logits,
         }
+        if self.pointer_probs is not None:
+            d["pointer_probs"] = self.pointer_probs
+        if self.alpha is not None:
+            d["alpha"] = self.alpha
+        if self.argument_probs is not None:
+            d["argument_probs"] = self.argument_probs
+        return d
 
     def __getitem__(self, item: str) -> torch.Tensor:
         """Allow dict-style key subscripting for backward compatibility."""
@@ -220,8 +231,10 @@ class CoordinateHead(nn.Module):
 
 class ArgumentHead(nn.Module):
     """
-    Linear projection for tokenized arguments (e.g., typing keystrokes, query strings).
-    Architecture: hidden_dim -> vocab_size.
+    Pointer-generator action argument head.
+    Combines vocabulary generation logits with copy attention distributions over input prompt tokens:
+        P(word) = alpha * P_vocab(word) + (1 - alpha) * sum_{i : x_i = word} P_pointer(i)
+    Falls back gracefully to standard vocabulary projection when prompt inputs are absent.
     """
 
     def __init__(self, config: JEDM2Config):
@@ -229,22 +242,105 @@ class ArgumentHead(nn.Module):
         self.config = config
         self.hidden_dim = config.hidden_dim
         self.vocab_size = config.vocab_size
+        self.pointer_dim = getattr(config, "pointer_dim", max(64, self.hidden_dim // 4))
 
-        # Linear projection: [hidden_dim -> vocab_size]
-        self.proj = nn.Linear(self.hidden_dim, self.vocab_size, bias=False)
+        # Standard vocabulary linear projection: [hidden_dim -> vocab_size]
+        self.vocab_proj = nn.Linear(self.hidden_dim, self.vocab_size, bias=False)
+        # Backward-compatibility alias (e.g. for weight tying in JEDM2Model)
+        self.proj = self.vocab_proj
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Pointer cross-attention query & key projections
+        self.query_proj = nn.Linear(self.hidden_dim, self.pointer_dim, bias=False)
+        self.key_proj = nn.Linear(self.hidden_dim, self.pointer_dim, bias=False)
+
+        # Generation probability gate: alpha = sigmoid(W_alpha [h; context] + b_alpha)
+        self.gate_fc = nn.Linear(self.hidden_dim * 2, 1, bias=True)
+
+    def forward_components(
+        self,
+        x: torch.Tensor,
+        prompt_hidden: Optional[torch.Tensor] = None,
+        prompt_ids: Optional[torch.Tensor] = None,
+        prompt_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
-        Forward pass for argument token projection.
-
-        Args:
-            x: Input tensor of shape [batch_size, seq_len, hidden_dim] or [batch_size, hidden_dim].
-
-        Returns:
-            Argument logits of shape [batch_size, seq_len, vocab_size] or [batch_size, vocab_size].
+        Compute argument outputs returning all components: (arg_logits_or_log_p, p_pointer, alpha, p_final).
         """
-        # [..., D] -> [..., vocab_size]
-        arg_logits = self.proj(x)
+        if prompt_hidden is None or prompt_ids is None:
+            raw_logits = self.vocab_proj(x)
+            return raw_logits, None, None, None
+
+        if x.ndim == 2:
+            # x: [B, D]
+            # prompt_hidden: [B, S_p, D]
+            # prompt_ids: [B, S_p]
+            q = self.query_proj(x)  # [B, pointer_dim]
+            k = self.key_proj(prompt_hidden)  # [B, S_p, pointer_dim]
+            scores = torch.bmm(k, q.unsqueeze(-1)).squeeze(-1) / math.sqrt(self.pointer_dim)  # [B, S_p]
+            num_special = getattr(self.config, "num_special_tokens", 11)
+            valid_mask = (prompt_ids >= num_special) & (prompt_ids < self.vocab_size)
+            if prompt_mask is not None:
+                valid_mask = valid_mask & prompt_mask
+            has_valid = valid_mask.any(dim=-1, keepdim=True)
+            effective_mask = torch.where(has_valid, valid_mask, (prompt_ids >= 0) & (prompt_ids < self.vocab_size))
+            scores = scores.masked_fill(~effective_mask, -1e4)
+
+            p_pointer = F.softmax(scores, dim=-1)  # [B, S_p]
+            context = torch.bmm(p_pointer.unsqueeze(1), prompt_hidden).squeeze(1)  # [B, D]
+            alpha = torch.sigmoid(self.gate_fc(torch.cat([x, context], dim=-1)))  # [B, 1]
+            vocab_logits = self.vocab_proj(x)  # [B, vocab_size]
+            p_vocab = F.softmax(vocab_logits, dim=-1)  # [B, vocab_size]
+
+            p_final = alpha * p_vocab  # [B, vocab_size]
+            safe_ids = prompt_ids.clamp(0, self.vocab_size - 1)
+            copy_src = ((1.0 - alpha) * p_pointer).to(p_final.dtype)
+            p_final = p_final.scatter_add(1, safe_ids, copy_src)
+
+            log_p = torch.log(p_final.clamp(min=1e-12))
+            return log_p, p_pointer, alpha, p_final
+        else:
+            # x: [B, S, D]
+            B, S, D = x.shape
+            _, S_p, _ = prompt_hidden.shape
+            q = self.query_proj(x)  # [B, S, pointer_dim]
+            k = self.key_proj(prompt_hidden)  # [B, S_p, pointer_dim]
+            scores = torch.bmm(q, k.transpose(1, 2)) / math.sqrt(self.pointer_dim)  # [B, S, S_p]
+
+            num_special = getattr(self.config, "num_special_tokens", 11)
+            valid_mask = (prompt_ids >= num_special) & (prompt_ids < self.vocab_size)
+            if prompt_mask is not None:
+                valid_mask = valid_mask & prompt_mask
+            has_valid = valid_mask.any(dim=-1, keepdim=True)
+            effective_mask = torch.where(has_valid, valid_mask, (prompt_ids >= 0) & (prompt_ids < self.vocab_size))
+            scores = scores.masked_fill(~effective_mask.unsqueeze(1), -1e4)
+
+            p_pointer = F.softmax(scores, dim=-1)  # [B, S, S_p]
+            context = torch.bmm(p_pointer, prompt_hidden)  # [B, S, D]
+            alpha = torch.sigmoid(self.gate_fc(torch.cat([x, context], dim=-1)))  # [B, S, 1]
+            vocab_logits = self.vocab_proj(x)  # [B, S, vocab_size]
+            p_vocab = F.softmax(vocab_logits, dim=-1)  # [B, S, vocab_size]
+
+            p_final = alpha * p_vocab  # [B, S, vocab_size]
+            safe_ids = prompt_ids.clamp(0, self.vocab_size - 1).unsqueeze(1).expand(-1, S, -1)
+            copy_src = ((1.0 - alpha) * p_pointer).to(p_final.dtype)
+            p_final = p_final.scatter_add(2, safe_ids, copy_src)
+
+            log_p = torch.log(p_final.clamp(min=1e-12))
+            return log_p, p_pointer, alpha, p_final
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        prompt_hidden: Optional[torch.Tensor] = None,
+        prompt_ids: Optional[torch.Tensor] = None,
+        prompt_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Forward pass returning argument logits or log-probabilities.
+        """
+        arg_logits, _, _, _ = self.forward_components(
+            x, prompt_hidden=prompt_hidden, prompt_ids=prompt_ids, prompt_mask=prompt_mask
+        )
         return arg_logits
 
 
@@ -254,7 +350,7 @@ class NativeActionHead(nn.Module):
     1. ActionGate: Action emission gating (emit action vs continue thinking).
     2. ActionTypeHead: Discrete UI primitive distribution.
     3. CoordinateHead: Normalized spatial coordinates in [0, 1].
-    4. ArgumentHead: Tokenized argument distributions.
+    4. ArgumentHead: Tokenized argument distributions with pointer-generator copy network.
     """
 
     def __init__(self, config: JEDM2Config):
@@ -273,6 +369,9 @@ class NativeActionHead(nn.Module):
         self,
         x: torch.Tensor,
         visual_tokens: Optional[torch.Tensor] = None,
+        prompt_hidden: Optional[torch.Tensor] = None,
+        prompt_ids: Optional[torch.Tensor] = None,
+        prompt_mask: Optional[torch.Tensor] = None,
     ) -> ActionOutput:
         """
         Forward pass executing all four action heads simultaneously.
@@ -281,9 +380,13 @@ class NativeActionHead(nn.Module):
             x: Hidden representations of shape [batch_size, seq_len, hidden_dim]
                or [batch_size, hidden_dim].
             visual_tokens: Optional visual patch tokens [batch_size, N_v, hidden_dim].
+            prompt_hidden: Optional prompt sequence hidden representations [batch_size, S_p, hidden_dim].
+            prompt_ids: Optional prompt token IDs [batch_size, S_p].
+            prompt_mask: Optional prompt boolean valid mask [batch_size, S_p].
 
         Returns:
-            ActionOutput containing gate logits, action type logits, coordinates, and argument logits.
+            ActionOutput containing gate logits, action type logits, coordinates, argument logits,
+            and optional pointer-generator components.
         """
         # 1. Gate logit: [..., 1]
         gate_logits = self.gate(x)
@@ -291,14 +394,19 @@ class NativeActionHead(nn.Module):
         action_type_logits = self.action_type_head(x)
         # 3. Coordinates: [..., 2] (with optional visual grounding)
         coordinates = self.coordinate_head(x, visual_tokens=visual_tokens)
-        # 4. Argument logits: [..., vocab_size]
-        argument_logits = self.argument_head(x)
+        # 4. Argument logits: [..., vocab_size] with optional pointer copy
+        argument_logits, p_pointer, alpha, p_final = self.argument_head.forward_components(
+            x, prompt_hidden=prompt_hidden, prompt_ids=prompt_ids, prompt_mask=prompt_mask
+        )
 
         return ActionOutput(
             gate_logits=gate_logits,
             action_type_logits=action_type_logits,
             coordinates=coordinates,
             argument_logits=argument_logits,
+            pointer_probs=p_pointer,
+            alpha=alpha,
+            argument_probs=p_final,
         )
 
     def predict_action(
@@ -306,6 +414,9 @@ class NativeActionHead(nn.Module):
         x: torch.Tensor,
         threshold: Optional[float] = None,
         visual_tokens: Optional[torch.Tensor] = None,
+        prompt_hidden: Optional[torch.Tensor] = None,
+        prompt_ids: Optional[torch.Tensor] = None,
+        prompt_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         """
         Inference-time helper to decode discrete action predictions from hidden state.
@@ -314,6 +425,9 @@ class NativeActionHead(nn.Module):
             x: Single-step or batch hidden representations [batch_size, hidden_dim] or [1, hidden_dim].
             threshold: Probability threshold for action gate commitment (defaults to config).
             visual_tokens: Optional visual patch tokens [batch_size, N_v, hidden_dim].
+            prompt_hidden: Optional prompt sequence hidden representations [batch_size, S_p, hidden_dim].
+            prompt_ids: Optional prompt token IDs [batch_size, S_p].
+            prompt_mask: Optional prompt boolean valid mask [batch_size, S_p].
 
         Returns:
             Dictionary with parsed action predictions:
@@ -327,7 +441,13 @@ class NativeActionHead(nn.Module):
         if threshold is None:
             threshold = getattr(self.config, "action_gate_threshold", 0.5)
 
-        out = self.forward(x, visual_tokens=visual_tokens)
+        out = self.forward(
+            x,
+            visual_tokens=visual_tokens,
+            prompt_hidden=prompt_hidden,
+            prompt_ids=prompt_ids,
+            prompt_mask=prompt_mask,
+        )
 
         # Gate sigmoid probability
         gate_prob = torch.sigmoid(out.gate_logits)

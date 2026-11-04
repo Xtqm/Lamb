@@ -166,6 +166,8 @@ class JEDM2Agent:
         self.current_pos: int = 0
         self.history: List[TurnRecord] = []
         self.turn_count: int = 0
+        self.cached_prompt_hidden: Optional[torch.Tensor] = None
+        self.cached_prompt_ids: Optional[torch.Tensor] = None
 
     def reset(self) -> None:
         """
@@ -176,20 +178,24 @@ class JEDM2Agent:
         self.current_pos = 0
         self.history.clear()
         self.turn_count = 0
+        self.cached_prompt_hidden = None
+        self.cached_prompt_ids = None
 
     def _feed_single_token(
         self,
         token_id: int,
         visual_tokens: Optional[torch.Tensor] = None,
+        use_prompt_context: bool = False,
     ) -> Tuple[torch.Tensor, ActionOutput]:
         """
         Feeds a single token ID through the model's recurrent step method.
         Preserves and updates recurrent states and position counter.
-        Supports visual patch tokens for grounded action decoding.
+        Supports visual patch tokens for grounded action decoding and prompt conditioning for pointer copy.
 
         Args:
             token_id: Integer token ID.
             visual_tokens: Optional visual patch tokens [1, N_v, hidden_dim].
+            use_prompt_context: If True, supplies cached prompt representations for pointer copy.
 
         Returns:
             Tuple of:
@@ -197,12 +203,16 @@ class JEDM2Agent:
             - action_output: ActionOutput container
         """
         token_tensor = torch.tensor([token_id], device=self.device, dtype=torch.long)
+        prompt_h = self.cached_prompt_hidden if use_prompt_context else None
+        prompt_ids = self.cached_prompt_ids if use_prompt_context else None
         with torch.no_grad():
             lm_logits, action_output, self.recurrent_states = self.model.step(
                 token_tensor,
                 states=self.recurrent_states,
                 pos=self.current_pos,
                 visual_tokens=visual_tokens,
+                prompt_hidden=prompt_h,
+                prompt_ids=prompt_ids,
             )
         self.current_pos += 1
         return lm_logits, action_output
@@ -211,14 +221,17 @@ class JEDM2Agent:
         self,
         token_ids: List[int],
         visual_tokens: Optional[torch.Tensor] = None,
+        cache_as_prompt: bool = True,
     ) -> Tuple[torch.Tensor, ActionOutput]:
         """
         Feeds a sequence of token IDs through parallel prompt prefill (model.prefill),
         advancing recurrent states and position counter in a single parallel tensor pass.
+        Caches prompt hidden representations for subsequent pointer-generator copy decoding.
 
         Args:
             token_ids: List of integer token IDs.
             visual_tokens: Optional visual patch tokens [1, N_v, hidden_dim].
+            cache_as_prompt: If True, preserves prompt representations in cache for pointer copying.
 
         Returns:
             Final step's (lm_logits, action_output).
@@ -235,15 +248,19 @@ class JEDM2Agent:
         start_pos = self.current_pos
 
         with torch.no_grad():
-            last_lm_logits, last_action_out, new_states = self.model.prefill(
+            last_lm_logits, last_action_out, new_states, prompt_h = self.model.prefill(
                 inp_tensor,
                 states=self.recurrent_states,
                 start_pos=start_pos,
                 visual_tokens=visual_tokens,
+                return_prompt_hidden=True,
             )
 
         self.recurrent_states = new_states
         self.current_pos = start_pos + len(token_ids)
+        if cache_as_prompt:
+            self.cached_prompt_hidden = prompt_h
+            self.cached_prompt_ids = inp_tensor
         return last_lm_logits, last_action_out
 
     def predict_next_latent_state(
@@ -427,8 +444,10 @@ class JEDM2Agent:
             lm_logits, action_output = self._feed_single_token(end_thought_id)
 
         action_token_id = self.tokenizer.special_tokens["<action>"]
-        # Ground coordinate head in visual patch tokens if available
-        lm_logits, action_output = self._feed_single_token(action_token_id, visual_tokens=visual_tokens)
+        # Ground coordinate head in visual patch tokens and condition on prompt representations for pointer copy
+        lm_logits, action_output = self._feed_single_token(
+            action_token_id, visual_tokens=visual_tokens, use_prompt_context=True
+        )
         gate_prob = float(torch.sigmoid(action_output.gate_logits).item())
 
         # Action primitive decoding (with optional JEPA latent rollout planning)
@@ -512,16 +531,24 @@ class JEDM2Agent:
             arg_end_id = self.tokenizer.special_tokens.get("</arg>", 10)
             eos_id = getattr(self.tokenizer, "EOS_TOKEN_ID", 2)
             action_end_id = self.tokenizer.special_tokens.get("</action>", 8)
+            space_ids = self.tokenizer.encode(" ") if hasattr(self.tokenizer, "encode") else []
+            space_id = space_ids[0] if space_ids else None
 
             arg_tokens: List[int] = []
-            cur_lm, cur_act = self._feed_single_token(arg_start_id)
-            for _ in range(16):
-                next_tok_id = int(torch.argmax(cur_act.argument_logits, dim=-1).item())
+            cur_lm, cur_act = self._feed_single_token(arg_start_id, use_prompt_context=True)
+            for step_idx in range(16):
+                logits = cur_act.argument_logits
+                # Suppress leading whitespace and consecutive repeated whitespace in argument generation
+                if space_id is not None and (step_idx == 0 or (arg_tokens and arg_tokens[-1] == space_id)):
+                    logits = logits.clone()
+                    logits[..., space_id] = -1e9
+
+                next_tok_id = int(torch.argmax(logits, dim=-1).item())
                 if next_tok_id in (arg_end_id, eos_id, action_end_id):
                     break
                 arg_tokens.append(next_tok_id)
-                cur_lm, cur_act = self._feed_single_token(next_tok_id)
-            self._feed_single_token(arg_end_id)
+                cur_lm, cur_act = self._feed_single_token(next_tok_id, use_prompt_context=True)
+            self._feed_single_token(arg_end_id, use_prompt_context=False)
 
             if hasattr(self.tokenizer, "decode_argument"):
                 arg_str = self.tokenizer.decode_argument(arg_tokens)
@@ -546,7 +573,7 @@ class JEDM2Agent:
         # Advance recurrent trajectory with closing tokens for next turn context
         close_prompt = f"{action_type.name} </action>"
         close_tokens = self.tokenizer.encode(close_prompt)
-        self._feed_token_sequence(close_tokens)
+        self._feed_token_sequence(close_tokens, cache_as_prompt=False)
 
         self.turn_count += 1
         is_terminal = (action_type == ActionType.FINISH)

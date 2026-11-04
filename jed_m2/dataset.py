@@ -422,6 +422,8 @@ class TrajectoryBatch:
     jepa_action_t: torch.Tensor  # [B] JEPA action discrete ID at time t
     jepa_obs_next: torch.Tensor  # [B, hidden_dim] JEPA target observation at time t+1
     images: Optional[torch.Tensor] = None  # [B, 3, H, W] screenshot images for visual grounding
+    prompt_token_ids: Optional[torch.Tensor] = None  # [B, S_p] prompt token IDs for pointer copy
+    prompt_mask: Optional[torch.Tensor] = None  # [B, S_p] boolean valid mask
 
     def to(self, device: torch.device, dtype: Optional[torch.dtype] = None) -> "TrajectoryBatch":
         """Transfers all internal batch tensors to target device and precision."""
@@ -433,6 +435,16 @@ class TrajectoryBatch:
         attn_mask_tensor = self.attention_mask.to(device=device)
         if dtype is not None and attn_mask_tensor.is_floating_point():
             attn_mask_tensor = attn_mask_tensor.to(dtype=dtype)
+        prompt_ids_tensor = (
+            self.prompt_token_ids.to(device=device)
+            if self.prompt_token_ids is not None
+            else None
+        )
+        prompt_mask_tensor = (
+            self.prompt_mask.to(device=device)
+            if self.prompt_mask is not None
+            else None
+        )
         return TrajectoryBatch(
             input_ids=self.input_ids.to(device=device),
             attention_mask=attn_mask_tensor,
@@ -449,6 +461,8 @@ class TrajectoryBatch:
             jepa_action_t=self.jepa_action_t.to(device=device),
             jepa_obs_next=self.jepa_obs_next.to(device=device, dtype=dtype or torch.float32),
             images=images_tensor,
+            prompt_token_ids=prompt_ids_tensor,
+            prompt_mask=prompt_mask_tensor,
         )
 
 
@@ -494,6 +508,7 @@ class TrajectoryCollator:
         batch_jepa_act_t: List[int] = []
         batch_jepa_obs_next: List[torch.Tensor] = []
         batch_images: List[torch.Tensor] = []
+        batch_prompt_tokens: List[List[int]] = []
 
         for sample in samples:
             tokens: List[int] = [self.tokenizer.BOS_TOKEN_ID]
@@ -503,6 +518,13 @@ class TrajectoryCollator:
             action_types: List[int] = []
             coords: List[Tuple[float, float]] = []
             is_spatial: List[bool] = []
+
+            # Extract prompt tokens (turn 0 observation text)
+            sample_prompt: List[int] = []
+            if sample.turns:
+                obs_toks_turn0 = self.tokenizer.encode(sample.turns[0].obs_text)[:128]
+                sample_prompt = [self.tokenizer.OBS_TOKEN_ID] + obs_toks_turn0 + [self.tokenizer.OBS_END_TOKEN_ID]
+            batch_prompt_tokens.append(sample_prompt or [self.tokenizer.BOS_TOKEN_ID])
 
             # Extract screenshot for visual grounding (turn 0)
             if sample.turns and sample.turns[0].screenshot is not None:
@@ -656,6 +678,15 @@ class TrajectoryCollator:
             padded_coords[b, :num_act] = torch.tensor(batch_coords[b], dtype=torch.float32)
             padded_coord_mask[b, :num_act] = torch.tensor(batch_is_spatial[b], dtype=torch.bool)
 
+        # Pad prompt tokens for pointer copy supervision
+        max_batch_prompt_len = max(max(len(p) for p in batch_prompt_tokens), 1)
+        padded_prompt_token_ids = torch.full((batch_size, max_batch_prompt_len), self.tokenizer.PAD_TOKEN_ID, dtype=torch.long)
+        padded_prompt_mask = torch.zeros((batch_size, max_batch_prompt_len), dtype=torch.bool)
+        for b in range(batch_size):
+            p_len = len(batch_prompt_tokens[b])
+            padded_prompt_token_ids[b, :p_len] = torch.tensor(batch_prompt_tokens[b], dtype=torch.long)
+            padded_prompt_mask[b, :p_len] = True
+
         # 4D Causal & Padding Attention Mask: [B, 1, S, S]
         # True = participate in attention, False = masked out
         pad_mask = (padded_input_ids != self.tokenizer.PAD_TOKEN_ID)[:, None, None, :]  # [B, 1, 1, S]
@@ -686,4 +717,6 @@ class TrajectoryCollator:
             jepa_action_t=jepa_action_t,
             jepa_obs_next=jepa_obs_next,
             images=images_tensor,
+            prompt_token_ids=padded_prompt_token_ids,
+            prompt_mask=padded_prompt_mask,
         )
