@@ -49,6 +49,12 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# LaTeX build intermediate files
+*.aux
+*.log
+*.blg
+*.out
+
 # Temporary planning and scratch docs
 FUTURE_PHASES_PROPOSALS.md
 *.tmp.md
