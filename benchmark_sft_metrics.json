@@ -96,5 +96,7 @@
     },
     "final_checkpoint": "C:\\Users\\caleb\\Documents\\Coding\\AI\\Meta-Experiment-AiByAi\\Lamb\\checkpoints\\checkpoint_final.pt",
     "baseline_checkpoint": "C:\\Users\\caleb\\Documents\\Coding\\AI\\Meta-Experiment-AiByAi\\Lamb\\checkpoints\\jed_m2_sft_base.pt"
-  }
+  },
+  "final_checkpoint": "checkpoints/checkpoint_final.pt",
+  "baseline_checkpoint": "checkpoints/jed_m2_sft_base.pt"
 }
