@@ -31,11 +31,11 @@ class JEDM2LossConfig:
     reason_weight: float = 1.0  # Weight for System 2 rationale NLL
     gate_weight: float = 1.0  # Weight for action gate emission binary classification
     action_type_weight: float = 2.0  # Weight for discrete primitive classification
-    coord_weight: float = 10.0  # Weight for continuous (x, y) spatial coordinates
+    coord_weight: float = 12.0  # Weight for continuous (x, y) spatial coordinates
     arg_weight: float = 8.0  # Calibrated weight for argument token prediction (effective scale ~0.89 vs 0.22 legacy)
     jepa_weight: float = 1.0  # Weight for JEPA latent world model consistency
     aux_weight: float = 1.0  # Weight for MoE load-balancing auxiliary loss
-    finish_action_weight: float = 2.0  # Class weighting factor for ActionType.FINISH
+    finish_action_weight: float = 2.5  # Class weighting factor for ActionType.FINISH
 
     # Regression and classification thresholds
     huber_beta: float = 0.05  # Beta threshold for Smooth L1 / Huber coordinate loss
@@ -157,9 +157,9 @@ class JEDM2CompositeLoss(nn.Module):
             valid_type_logits = gathered_type_logits[batch.action_type_mask]  # [N_acts, num_action_types]
             valid_type_targets = batch.action_type_targets[batch.action_type_mask]  # [N_acts]
 
-            # Calibrated class weights: CLICK=0.5, TYPE=3.0, SCROLL=1.5, NAVIGATE=1.5, API_CALL=1.5, FINISH=finish_action_weight
-            finish_w = getattr(cfg, "finish_action_weight", 2.0)
-            legacy_type_weights = [0.5, 3.0, 1.5, 1.5, 1.5, finish_w]
+            # Calibrated class weights: CLICK=1.5, TYPE=2.0, SCROLL=1.2, NAVIGATE=1.2, API_CALL=1.2, FINISH=finish_action_weight
+            finish_w = getattr(cfg, "finish_action_weight", 2.5)
+            legacy_type_weights = [1.5, 2.0, 1.2, 1.2, 1.2, finish_w]
             type_weights = torch.tensor(
                 (legacy_type_weights + [2.0] * max(0, num_action_types - len(legacy_type_weights)))[:num_action_types],
                 device=valid_type_logits.device,

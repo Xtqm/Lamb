@@ -45,6 +45,14 @@ except ImportError:
 
 from jed_m2.config import JEDM2Config
 from jed_m2.core.types import UIElement
+from jed_m2.dom_delta import (
+    BROWSER_MUTATION_OBSERVER_INJECTION_JS,
+    BROWSER_MUTATION_POLL_JS,
+    DOMDeltaRecord,
+    ShadowDOMRegistry,
+    check_upheaval_threshold,
+    diff_elements,
+)
 from jed_m2.environment import (
     EnvironmentState,
     ScenarioDefinition,
@@ -265,12 +273,14 @@ def get_fixture_path(scenario_id: str) -> Optional[Path]:
 class PlaywrightStepResult(StepResult):
     """
     Extended StepResult carrying live viewport screenshot tensor [3, H, W],
-    raw accessibility data, and programmatic task oracle verification details.
+    raw accessibility data, programmatic task oracle verification details,
+    and differential DOM mutation delta records.
     """
 
     screenshot: Optional[torch.Tensor] = None
     raw_accessibility_tree: Optional[Union[Dict[str, Any], str]] = None
     oracle_details: Optional[Dict[str, Any]] = None
+    delta_record: Optional[DOMDeltaRecord] = None
 
 
 # ==============================================================================
@@ -300,6 +310,7 @@ class PlaywrightEnvironment:
         device: Union[str, torch.device] = "cpu",
         dtype: torch.dtype = torch.bfloat16,
         mock_mode: bool = False,
+        use_differential_obs: bool = True,
         fixture_path: Optional[Union[str, Path]] = None,
         local_benchmark_url: Optional[str] = None,
     ):
@@ -314,8 +325,12 @@ class PlaywrightEnvironment:
         self.device = torch.device(device)
         self.dtype = dtype
         self.mock_mode = mock_mode or (os.getenv("JED_M2_MOCK_BROWSER", "0") == "1")
+        self.use_differential_obs = use_differential_obs
         self.fixture_path = Path(fixture_path) if fixture_path else None
         self.local_benchmark_url = local_benchmark_url
+
+        self._prev_elements: List[UIElement] = []
+        self._shadow_registry: ShadowDOMRegistry = ShadowDOMRegistry()
 
         # Scenarios catalog
         self.scenarios = get_default_scenarios()
@@ -402,8 +417,16 @@ class PlaywrightEnvironment:
                     device_scale_factor=1.0,
                 )
                 self._context.set_default_timeout(self.timeout_ms)
+                try:
+                    self._context.add_init_script(BROWSER_MUTATION_OBSERVER_INJECTION_JS)
+                except Exception:
+                    pass
 
             self._page = self._context.new_page()
+            try:
+                self._page.evaluate(BROWSER_MUTATION_OBSERVER_INJECTION_JS)
+            except Exception:
+                pass
             return self._page
         except Exception as exc:
             logger.warning("Could not launch Playwright Chromium: %s. Using synthetic DOM fallback.", exc)
@@ -710,18 +733,92 @@ class PlaywrightEnvironment:
                 )
             return None
 
-    def _format_observation_text(self) -> str:
-        """Formats concise text observation matching pretraining grammar: URL: ... | DOM: <button ...>."""
+    def _poll_browser_mutations(self) -> List[Dict[str, Any]]:
+        """Clears and returns accumulated in-browser mutation records."""
+        if self._page is not None and not self._synthetic_dom_fallback:
+            try:
+                return self._page.evaluate(BROWSER_MUTATION_POLL_JS) or []
+            except Exception:
+                return []
+        return []
+
+    def _format_observation(
+        self,
+        is_delta: bool = False,
+        is_nav: bool = False,
+    ) -> Tuple[str, DOMDeltaRecord]:
+        """
+        Formats observation string and constructs DOMDeltaRecord.
+        When use_differential_obs is True:
+          - On reset or navigation (is_nav=True): returns full DOM snapshot (<obs full>).
+          - On intermediate steps (is_delta=True): checks for upheaval (>50% mutation or >32 elements),
+            returning differential delta (<obs delta>) or falling back to full snapshot.
+        When use_differential_obs is False:
+          - Returns legacy full-DOM observation string (URL: ... | DOM: ...).
+        """
         if self.current_state is None:
-            return "[Page: None]"
+            empty_delta = DOMDeltaRecord(is_full_snapshot=True, url="about:blank")
+            return "[Page: None]", empty_delta
 
         url = self.current_state.url
-        elements = self.current_state.elements
+        elements = self.current_state.elements or []
 
-        if elements:
-            dom_str = " ".join([el.to_dom_string() for el in elements[:64]])
-            return f"URL: {url} | DOM: {dom_str}"
-        return f"URL: {url} | DOM: [No interactive elements]"
+        if not self.use_differential_obs:
+            dom_str = " ".join([el.to_dom_string() for el in elements[:64]]) if elements else "[No interactive elements]"
+            text = f"URL: {url} | DOM: {dom_str}"
+            delta_rec = DOMDeltaRecord(
+                is_full_snapshot=True,
+                url=url,
+                step=self.current_state.step_count,
+                full_elements=elements,
+            )
+            return text, delta_rec
+
+        if not is_delta or is_nav or not self._prev_elements:
+            # Full snapshot
+            delta_rec = DOMDeltaRecord(
+                is_full_snapshot=True,
+                url=url,
+                step=self.current_state.step_count,
+                full_elements=elements,
+            )
+            self._prev_elements = list(elements)
+            self._shadow_registry.reset(elements)
+            self._poll_browser_mutations()
+            return delta_rec.to_obs_string(), delta_rec
+
+        # Intermediate step: differential delta
+        mutations = diff_elements(self._prev_elements, elements)
+        is_upheaval = check_upheaval_threshold(mutations, len(self._prev_elements))
+
+        if is_upheaval:
+            delta_rec = DOMDeltaRecord(
+                is_full_snapshot=True,
+                is_upheaval=True,
+                url=url,
+                step=self.current_state.step_count,
+                full_elements=elements,
+            )
+            self._prev_elements = list(elements)
+            self._shadow_registry.reset(elements)
+            self._poll_browser_mutations()
+            return delta_rec.to_obs_string(), delta_rec
+
+        delta_rec = DOMDeltaRecord(
+            mutations=mutations,
+            is_full_snapshot=False,
+            url=url,
+            step=self.current_state.step_count,
+        )
+        self._shadow_registry.apply_delta(delta_rec)
+        self._prev_elements = list(elements)
+        self._poll_browser_mutations()
+        return delta_rec.to_obs_string(), delta_rec
+
+    def _format_observation_text(self, is_delta: bool = False, is_nav: bool = False) -> str:
+        """Formats concise text observation matching pretraining grammar: URL: ... | DOM: <button ...>."""
+        text, _ = self._format_observation(is_delta=is_delta, is_nav=is_nav)
+        return text
 
     def _generate_obs_features(self) -> torch.Tensor:
         """Generates deterministic dense representation vector [hidden_dim] for JEPA world model."""
@@ -845,7 +942,7 @@ class PlaywrightEnvironment:
             metadata=meta,
         )
 
-        obs_text = self._format_observation_text()
+        obs_text, delta_record = self._format_observation(is_delta=False, is_nav=False)
         if nav_error:
             obs_text = f"[Navigation Error: {nav_error}]\n{obs_text}"
         obs_features = self._generate_obs_features()
@@ -858,6 +955,8 @@ class PlaywrightEnvironment:
             "screenshot": screenshot,
             "elements": elements,
             "navigation_error": nav_error,
+            "delta_record": delta_record,
+            "is_delta": not delta_record.is_full_snapshot,
         }
 
         return PlaywrightStepResult(
@@ -869,6 +968,7 @@ class PlaywrightEnvironment:
             screenshot=screenshot,
             raw_accessibility_tree=raw_tree,
             oracle_details=None,
+            delta_record=delta_record,
             info=info,
         )
 
@@ -1063,7 +1163,8 @@ class PlaywrightEnvironment:
         }
         self.action_history.append(action_log)
 
-        obs_text = self._format_observation_text()
+        is_nav = (act_enum == ActionType.NAVIGATE or curr_url != self.current_state.url)
+        obs_text, delta_record = self._format_observation(is_delta=True, is_nav=is_nav)
         if action_error:
             obs_text = f"[Action Error: {action_error}]\n{obs_text}"
         obs_features = self._generate_obs_features()
@@ -1082,6 +1183,8 @@ class PlaywrightEnvironment:
             "elements": elements,
             "oracle_details": oracle_details,
             "scenario": self.active_scenario.scenario_id if self.active_scenario else None,
+            "delta_record": delta_record,
+            "is_delta": not delta_record.is_full_snapshot,
         }
 
         return PlaywrightStepResult(
@@ -1093,6 +1196,7 @@ class PlaywrightEnvironment:
             screenshot=screenshot,
             raw_accessibility_tree=raw_tree,
             oracle_details=oracle_details,
+            delta_record=delta_record,
             info=info,
         )
 

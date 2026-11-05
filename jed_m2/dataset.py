@@ -135,7 +135,7 @@ class SyntheticTrajectoryGenerator:
 
     compute_obs_features = staticmethod(compute_obs_features)
 
-    # Trajectory workflow templates
+    # Trajectory workflow templates covering diverse interactive domains
     SCENARIOS = [
         {
             "domain": "ecommerce",
@@ -170,6 +170,62 @@ class SyntheticTrajectoryGenerator:
                 (ActionType.CLICK, "button", "submit_btn", "edit_inbound_rules", "", "Click edit inbound rules button"),
                 (ActionType.API_CALL, "input", "search_bar", "rule_api", "authorize_ingress port=443 cidr=0.0.0.0/0", "Emit authorized ingress API update"),
                 (ActionType.FINISH, "button", "submit_btn", "save_rules", "saved", "Commit rule changes and terminate"),
+            ],
+        },
+        {
+            "domain": "booking",
+            "goal": "Search flights from SFO to JFK, select flight FL-382, and confirm booking for Alex Chen",
+            "steps": [
+                (ActionType.TYPE, "input", "origin_input", "origin_field", "SFO", "Enter departure airport"),
+                (ActionType.TYPE, "input", "dest_input", "dest_field", "JFK", "Enter arrival destination airport"),
+                (ActionType.CLICK, "button", "search_flights_btn", "search_btn", "", "Click search flights button"),
+                (ActionType.CLICK, "button", "select_flight_FL-382", "flight_card", "", "Select flight FL-382"),
+                (ActionType.TYPE, "input", "passenger_name_input", "name_field", "Alex Chen", "Enter passenger full name"),
+                (ActionType.CLICK, "button", "proceed_to_review_btn", "review_btn", "", "Proceed to booking review summary"),
+                (ActionType.CLICK, "button", "confirm_booking_btn", "confirm_btn", "", "Click confirm and complete booking"),
+                (ActionType.FINISH, "div", "confirmation_banner", "complete_marker", "confirmed", "Confirm reservation and terminate"),
+            ],
+        },
+        {
+            "domain": "crm",
+            "goal": "Create a new high-priority deal for Acme Corp with value 50000 in CRM pipeline",
+            "steps": [
+                (ActionType.CLICK, "button", "create_deal_btn", "new_deal_btn", "", "Open deal creation modal"),
+                (ActionType.TYPE, "input", "deal_company_input", "company_field", "Acme Corp", "Enter client company name"),
+                (ActionType.TYPE, "input", "deal_value_input", "value_field", "50000", "Enter deal estimated revenue value"),
+                (ActionType.CLICK, "button", "save_deal_btn", "save_btn", "", "Save deal to pipeline"),
+                (ActionType.FINISH, "div", "deal_card", "finish_marker", "saved", "Verify deal added to pipeline and finish"),
+            ],
+        },
+        {
+            "domain": "cloud_admin",
+            "goal": "Terminate stale compute instance i-0a89bc and confirm with DELETE in cloud console",
+            "steps": [
+                (ActionType.CLICK, "button", "select_vpc_vpc-prod", "vpc_select", "", "Select production VPC"),
+                (ActionType.CLICK, "button", "terminate_i-0a89bc", "terminate_btn", "", "Click terminate instance button"),
+                (ActionType.TYPE, "input", "confirm_input", "modal_input", "DELETE", "Type DELETE to confirm instance termination"),
+                (ActionType.CLICK, "button", "confirm_delete_btn", "confirm_btn", "", "Confirm instance deletion"),
+                (ActionType.FINISH, "div", "status_banner", "finish_marker", "terminated", "Verify termination and complete task"),
+            ],
+        },
+        {
+            "domain": "web_browser",
+            "goal": "Accept cookie consent overlay and navigate to Docs page",
+            "steps": [
+                (ActionType.CLICK, "button", "accept_cookies_btn", "cookie_btn", "", "Dismiss cookie consent popup modal"),
+                (ActionType.CLICK, "a", "nav_to_docs", "docs_link", "", "Click Docs navigation hyperlink"),
+                (ActionType.FINISH, "h1", "page_title", "finish_marker", "success", "Confirm Docs page rendered and complete"),
+            ],
+        },
+        {
+            "domain": "ecommerce",
+            "goal": "Apply promo coupon SAVE20 in cart and proceed to checkout",
+            "steps": [
+                (ActionType.CLICK, "button", "view_cart_btn", "cart_btn", "", "Open shopping cart view"),
+                (ActionType.TYPE, "input", "coupon_input", "coupon_field", "SAVE20", "Type discount coupon code"),
+                (ActionType.CLICK, "button", "apply_coupon_btn", "apply_btn", "", "Apply coupon code"),
+                (ActionType.CLICK, "button", "proceed_checkout_btn", "checkout_btn", "", "Proceed to secure checkout"),
+                (ActionType.FINISH, "div", "order_review", "finish_marker", "checkout_ready", "Complete checkout initiation"),
             ],
         },
     ]

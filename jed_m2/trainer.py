@@ -460,7 +460,7 @@ class JEDM2Trainer:
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Checkpoint file not found: {filepath}")
 
-        checkpoint = torch.load(filepath, map_location=self.device)
+        checkpoint = torch.load(filepath, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         if "optimizer_state_dict" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

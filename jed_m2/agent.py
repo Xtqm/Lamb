@@ -49,6 +49,8 @@ class AgentStepOutput:
     raw_action_output: Optional[ActionOutput] = None
     jepa_planning_scores: Optional[Dict[str, float]] = None
     is_terminal: bool = False
+    is_delta: bool = False
+    obs_token_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         """Converts agent step output to dictionary."""
@@ -62,6 +64,8 @@ class AgentStepOutput:
             "gate_prob": self.gate_prob,
             "num_thought_tokens": self.num_thought_tokens,
             "is_terminal": self.is_terminal,
+            "is_delta": self.is_delta,
+            "obs_token_count": self.obs_token_count,
         }
         if self.jepa_planning_scores is not None:
             res["jepa_planning_scores"] = self.jepa_planning_scores
@@ -114,6 +118,9 @@ class TurnRecord:
     reward: float
     done: bool
     gate_prob: float
+    is_delta: bool = False
+    delta_tokens_count: int = 0
+    prefill_savings: int = 0
 
 
 # ==============================================================================
@@ -139,7 +146,7 @@ class JEDM2Agent:
         use_jepa_planning: bool = False,
         jepa_planning_lambda: float = 1.0,
         snap_coordinates_to_candidates: bool = True,
-        max_snap_distance: Optional[float] = 0.20,
+        max_snap_distance: Optional[float] = 0.35,
     ):
         self.model = model
         self.config = config if config is not None else getattr(model, "config", JEDM2Config())
@@ -595,11 +602,17 @@ class JEDM2Agent:
         # 1. Observation Prompt Encoding & Ingestion
         # ======================================================================
         # Format turn prompt
-        prompt = f"<obs> {obs_text} </obs> <thought>"
-        if self.turn_count == 0:
+        is_delta = "<obs delta>" in obs_text
+        if obs_text.startswith("<obs"):
+            prompt = f"{obs_text} <thought>"
+        else:
+            prompt = f"<obs> {obs_text} </obs> <thought>"
+
+        if self.turn_count == 0 and "<bos>" not in prompt:
             prompt = f"<bos> {prompt}"
 
         obs_tokens = self.tokenizer.encode(prompt)
+        obs_token_count = len(obs_tokens)
         # Advance recurrent states through the observation prompt
         lm_logits, action_output = self._feed_token_sequence(obs_tokens)
 
@@ -791,6 +804,8 @@ class JEDM2Agent:
             raw_action_output=action_output,
             jepa_planning_scores=jepa_planning_scores,
             is_terminal=is_terminal,
+            is_delta=is_delta,
+            obs_token_count=obs_token_count,
         )
 
     def step(
@@ -841,7 +856,10 @@ class JEDM2Agent:
                 screenshot = init_res.info.get("screenshot", None)
         else:
             if hasattr(env, "_format_observation_text"):
-                obs_text = env._format_observation_text()
+                try:
+                    obs_text = env._format_observation_text(is_delta=True)
+                except TypeError:
+                    obs_text = env._format_observation_text()
             else:
                 obs_text = getattr(env.current_state, "last_action_str", "") or "Observation"
             if hasattr(env, "_generate_obs_features"):
@@ -873,6 +891,10 @@ class JEDM2Agent:
         )
 
         is_done = step_res.done or agent_output.is_terminal
+        is_delta = getattr(agent_output, "is_delta", False) or ("<obs delta>" in obs_text)
+        delta_tokens_count = getattr(agent_output, "obs_token_count", 0)
+        prefill_savings = max(0, 350 - delta_tokens_count) if is_delta else 0
+
         record = TurnRecord(
             turn_id=self.turn_count,
             obs_text=obs_text,
@@ -883,6 +905,9 @@ class JEDM2Agent:
             reward=step_res.reward,
             done=is_done,
             gate_prob=agent_output.gate_prob,
+            is_delta=is_delta,
+            delta_tokens_count=delta_tokens_count,
+            prefill_savings=prefill_savings,
         )
         self.history.append(record)
 

@@ -276,7 +276,7 @@ def main() -> None:
     model = JEDM2Model(model_config).to(device=device, dtype=dtype)
     if args.model_path:
         print(f"[Init] Loading policy weights from: {args.model_path}")
-        ckpt = torch.load(args.model_path, map_location=device)
+        ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
         state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         print(f"[Init] Policy loaded successfully (missing keys: {len(missing)}, unexpected: {len(unexpected)})")
