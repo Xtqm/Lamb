@@ -381,6 +381,8 @@ class SearchCandidateResult:
     fused_score: float
     pruned: bool
     prune_reason: str = ""
+    rdtree_reward: float = 0.0
+    rdtree_diag: Optional[str] = None
 
 
 @dataclass
@@ -416,6 +418,8 @@ class JEPASearchHarness:
         loop_threshold: float = 0.05,
         plan_lambda: float = 1.0,
         spatial_beta: float = 2.0,
+        rdtree_gamma: float = 1.0,
+        rdtree_critic: Optional[Any] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
     ):
@@ -424,6 +428,8 @@ class JEPASearchHarness:
         self.loop_threshold = loop_threshold
         self.plan_lambda = plan_lambda
         self.spatial_beta = spatial_beta
+        self.rdtree_gamma = rdtree_gamma
+        self.rdtree_critic = rdtree_critic
         if device is not None:
             self.device = torch.device(device)
         else:
@@ -440,6 +446,8 @@ class JEPASearchHarness:
         candidates: List[CandidateAction],
         latent_history: Optional[List[torch.Tensor]] = None,
         pointer_prior: Optional[Tuple[float, float]] = None,
+        rdtree_critic: Optional[Any] = None,
+        elements: Optional[List[Any]] = None,
     ) -> JEPASearchResult:
         """
         Evaluates candidate action hypotheses in a single batched JEPA latent rollout pass.
@@ -500,6 +508,7 @@ class JEPASearchHarness:
         all_candidates_scored: List[Tuple[float, int, Tuple[float, float], str]] = []
 
         rx, ry = pointer_prior if pointer_prior is not None else (0.5, 0.5)
+        critic = rdtree_critic if rdtree_critic is not None else self.rdtree_critic
 
         for m in range(M):
             cand = candidates[m]
@@ -509,11 +518,40 @@ class JEPASearchHarness:
             drift = g_dist - curr_goal_dist
 
             spatial_dist = math.hypot(cx - rx, cy - ry)
-            fused_score = cand.raw_score - self.spatial_beta * spatial_dist - self.plan_lambda * g_dist
+
+            # Symbolic RDTree Process Supervision
+            rdtree_reward = 0.0
+            rdtree_diag: Optional[str] = None
+            rdtree_pruned = False
+            rdtree_prune_reason = ""
+
+            if critic is not None:
+                r_eval = critic.evaluate_action(
+                    action_type=cand.action_type_id,
+                    coordinates=cand.coordinates,
+                    argument=cand.argument,
+                    elements=elements,
+                )
+                rdtree_reward = float(r_eval.process_reward)
+                rdtree_diag = r_eval.diagnostic.value if hasattr(r_eval.diagnostic, "value") else str(r_eval.diagnostic)
+                if r_eval.is_critical_violation or rdtree_reward <= -0.8:
+                    rdtree_pruned = True
+                    rdtree_prune_reason = f"rdtree ({rdtree_diag}: {r_eval.message})"
+
+            # Fused candidate utility: policy logit - spatial - goal_dist + gamma * rdtree_reward
+            fused_score = (
+                cand.raw_score
+                - self.spatial_beta * spatial_dist
+                - self.plan_lambda * g_dist
+                + self.rdtree_gamma * rdtree_reward
+            )
 
             pruned = False
             prune_reason = ""
-            if drift > self.drift_threshold:
+            if rdtree_pruned:
+                pruned = True
+                prune_reason = rdtree_prune_reason
+            elif drift > self.drift_threshold:
                 pruned = True
                 prune_reason = f"drift ({drift:.3f} > {self.drift_threshold:.3f})"
             elif loop_dist < self.loop_threshold:
@@ -530,6 +568,8 @@ class JEPASearchHarness:
                 fused_score=fused_score,
                 pruned=pruned,
                 prune_reason=prune_reason,
+                rdtree_reward=rdtree_reward,
+                rdtree_diag=rdtree_diag,
             )
             evaluated_candidates.append(eval_res)
             all_candidates_scored.append((fused_score, cand.action_type_id, cand.coordinates, cand.argument))
@@ -559,4 +599,28 @@ class JEPASearchHarness:
             num_candidates_pruned=M - len(valid_candidates),
             latency_ms=latency_ms,
             candidates=evaluated_candidates,
+        )
+
+    def rank_candidates(
+        self,
+        z_t: torch.Tensor,
+        z_goal: torch.Tensor,
+        candidates: List[CandidateAction],
+        latent_history: Optional[List[torch.Tensor]] = None,
+        pointer_prior: Optional[Tuple[float, float]] = None,
+        rdtree_critic: Optional[Any] = None,
+        elements: Optional[List[Any]] = None,
+    ) -> JEPASearchResult:
+        """
+        Ranks prospective candidate actions using JEPA latent rollout and RDTree supervision.
+        Alias for search().
+        """
+        return self.search(
+            z_t=z_t,
+            z_goal=z_goal,
+            candidates=candidates,
+            latent_history=latent_history,
+            pointer_prior=pointer_prior,
+            rdtree_critic=rdtree_critic,
+            elements=elements,
         )

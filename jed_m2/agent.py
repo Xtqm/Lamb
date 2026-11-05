@@ -52,6 +52,8 @@ class AgentStepOutput:
     is_terminal: bool = False
     is_delta: bool = False
     obs_token_count: int = 0
+    rdtree_diagnostic: Optional[str] = None
+    rdtree_reward: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Converts agent step output to dictionary."""
@@ -70,6 +72,10 @@ class AgentStepOutput:
         }
         if self.jepa_planning_scores is not None:
             res["jepa_planning_scores"] = self.jepa_planning_scores
+        if self.rdtree_diagnostic is not None:
+            res["rdtree_diagnostic"] = self.rdtree_diagnostic
+        if self.rdtree_reward is not None:
+            res["rdtree_reward"] = self.rdtree_reward
         return res
 
     def summary_str(self) -> str:
@@ -77,8 +83,13 @@ class AgentStepOutput:
         cx, cy = self.coordinates
         arg_repr = f" arg='{self.argument}'" if self.argument else ""
         plan_repr = " [JEPA-planned]" if self.jepa_planning_scores else ""
+        rdtree_repr = (
+            f" [RDTree={self.rdtree_diagnostic}:{self.rdtree_reward:+.2f}]"
+            if self.rdtree_diagnostic is not None and self.rdtree_reward is not None
+            else ""
+        )
         return (
-            f"Action: {self.action_name} at ({cx:.2f}, {cy:.2f}){arg_repr}{plan_repr} "
+            f"Action: {self.action_name} at ({cx:.2f}, {cy:.2f}){arg_repr}{plan_repr}{rdtree_repr} "
             f"[Gate={self.gate_prob:.3f}, ThoughtTokens={self.num_thought_tokens}]"
         )
 
@@ -122,6 +133,8 @@ class TurnRecord:
     is_delta: bool = False
     delta_tokens_count: int = 0
     prefill_savings: int = 0
+    rdtree_diagnostic: Optional[str] = None
+    rdtree_reward: Optional[float] = None
 
 
 # ==============================================================================
@@ -150,12 +163,16 @@ class JEDM2Agent:
         max_snap_distance: Optional[float] = 0.35,
         capability_mask: Optional[CapabilityMask] = None,
         pointer_table: Optional[SymbolicPointerTable] = None,
+        rdtree_critic: Optional[Any] = None,
+        rdtree_gamma: float = 1.0,
     ):
         self.model = model
         self.config = config if config is not None else getattr(model, "config", JEDM2Config())
         self.tokenizer = tokenizer if tokenizer is not None else ActionBPETokenizer(self.config.vocab_size)
         self.capability_mask = capability_mask
         self.pointer_table = pointer_table
+        self.rdtree_critic = rdtree_critic
+        self.rdtree_gamma = rdtree_gamma
 
         if device is None:
             # Infer device from model parameters
@@ -178,6 +195,8 @@ class JEDM2Agent:
             self.search_harness = JEPASearchHarness(
                 jepa_model=model.jepa,
                 plan_lambda=jepa_planning_lambda,
+                rdtree_gamma=rdtree_gamma,
+                rdtree_critic=rdtree_critic,
                 device=self.device,
                 dtype=self.dtype,
             )
@@ -197,7 +216,8 @@ class JEDM2Agent:
     def reset(self) -> None:
         """
         Reinitializes agent runtime for a new episode.
-        Clears recurrent state buffers, resets position counter, and flushes turn history.
+        Clears recurrent state buffers, resets position counter, flushes turn history,
+        and clears the RDTree symbolic history.
         """
         self.recurrent_states = None
         self.current_pos = 0
@@ -206,6 +226,8 @@ class JEDM2Agent:
         self.turn_count = 0
         self.cached_prompt_hidden = None
         self.cached_prompt_ids = None
+        if self.rdtree_critic is not None and hasattr(self.rdtree_critic, "reset"):
+            self.rdtree_critic.reset()
 
     def _feed_single_token(
         self,
@@ -389,6 +411,8 @@ class JEDM2Agent:
         loop_threshold: float = 0.05,
         plan_lambda: float = 1.0,
         spatial_beta: float = 2.0,
+        rdtree_critic: Optional[Any] = None,
+        rdtree_gamma: Optional[float] = None,
     ) -> Tuple[int, Tuple[float, float], Dict[str, Any]]:
         """
         Evaluates candidate actions grounded on interactable DOM elements using 1-step JEPA lookahead,
@@ -483,6 +507,9 @@ class JEDM2Agent:
         # Operationalize Best-of-N JEPA Test-Time Search Harness
         from jed_m2.jepa import CandidateAction, JEPASearchHarness
         harness = self.search_harness
+        critic = rdtree_critic if rdtree_critic is not None else self.rdtree_critic
+        gamma = rdtree_gamma if rdtree_gamma is not None else self.rdtree_gamma
+
         if harness is None:
             harness = JEPASearchHarness(
                 jepa_model=self.model.jepa,
@@ -490,6 +517,8 @@ class JEDM2Agent:
                 loop_threshold=loop_threshold,
                 plan_lambda=plan_lambda,
                 spatial_beta=spatial_beta,
+                rdtree_gamma=gamma,
+                rdtree_critic=critic,
                 device=self.device,
                 dtype=self.dtype,
             )
@@ -498,6 +527,8 @@ class JEDM2Agent:
             harness.loop_threshold = loop_threshold
             harness.plan_lambda = plan_lambda
             harness.spatial_beta = spatial_beta
+            harness.rdtree_gamma = gamma
+            harness.rdtree_critic = critic
 
         candidate_objs = [
             CandidateAction(
@@ -514,6 +545,8 @@ class JEDM2Agent:
             candidates=candidate_objs,
             latent_history=self.latent_history,
             pointer_prior=raw_coords,
+            rdtree_critic=critic,
+            elements=candidate_elements,
         )
 
         details = [
@@ -527,9 +560,18 @@ class JEDM2Agent:
                 "score": c.fused_score,
                 "pruned": c.pruned,
                 "prune_reason": c.prune_reason,
+                "rdtree_reward": c.rdtree_reward,
+                "rdtree_diag": c.rdtree_diag,
             }
             for c in search_res.candidates
         ]
+
+        selected_cand = next(
+            (c for c in search_res.candidates if c.action_type_id == search_res.selected_action_id and c.coordinates == search_res.selected_coordinates),
+            None,
+        )
+        selected_rdtree_reward = selected_cand.rdtree_reward if selected_cand else None
+        selected_rdtree_diag = selected_cand.rdtree_diag if selected_cand else None
 
         metadata = {
             "current_goal_dist": curr_goal_dist,
@@ -539,6 +581,8 @@ class JEDM2Agent:
             "selected_action": ActionType(search_res.selected_action_id).name,
             "selected_coords": search_res.selected_coordinates,
             "selected_score": search_res.selected_score,
+            "selected_rdtree_reward": selected_rdtree_reward,
+            "selected_rdtree_diag": selected_rdtree_diag,
             "latency_ms": search_res.latency_ms,
             "candidates": details,
         }
@@ -671,6 +715,8 @@ class JEDM2Agent:
         should_plan = self.use_jepa_planning if use_jepa_planning is None else use_jepa_planning
         plan_lambda = self.jepa_planning_lambda if jepa_planning_lambda is None else jepa_planning_lambda
         jepa_planning_scores: Optional[Dict[str, float]] = None
+        selected_rdtree_diag: Optional[str] = None
+        selected_rdtree_reward: Optional[float] = None
 
         if should_plan and getattr(self.model, "jepa", None) is not None:
             # Prepare current state latent representation z_t
@@ -703,6 +749,9 @@ class JEDM2Agent:
 
             action_type_id = sel_act_id
             coords = sel_coords
+            selected_rdtree_diag = planning_meta.get("selected_rdtree_diag")
+            selected_rdtree_reward = planning_meta.get("selected_rdtree_reward")
+
             jepa_planning_scores = {
                 f"{c['action']}@{c['coords'][0]:.2f},{c['coords'][1]:.2f}": float(c["score"])
                 for c in planning_meta.get("candidates", [])
@@ -796,6 +845,17 @@ class JEDM2Agent:
         self.turn_count += 1
         is_terminal = (action_type == ActionType.FINISH)
 
+        # Process supervision via RDTree critic if not already obtained from planning
+        if selected_rdtree_diag is None and self.rdtree_critic is not None:
+            r_eval = self.rdtree_critic.evaluate_action(
+                action_type=action_type,
+                coordinates=coords,
+                argument=arg_str,
+                elements=candidate_elements,
+            )
+            selected_rdtree_diag = r_eval.diagnostic.value if hasattr(r_eval.diagnostic, "value") else str(r_eval.diagnostic)
+            selected_rdtree_reward = float(r_eval.process_reward)
+
         return AgentStepOutput(
             action_type=action_type,
             action_type_id=action_type_id,
@@ -811,6 +871,8 @@ class JEDM2Agent:
             is_terminal=is_terminal,
             is_delta=is_delta,
             obs_token_count=obs_token_count,
+            rdtree_diagnostic=selected_rdtree_diag,
+            rdtree_reward=selected_rdtree_reward,
         )
 
     def step(
@@ -951,6 +1013,8 @@ class JEDM2Agent:
                     is_delta=is_delta,
                     delta_tokens_count=delta_tokens_count,
                     prefill_savings=prefill_savings,
+                    rdtree_diagnostic="SECURITY_BLOCKED",
+                    rdtree_reward=-1.0,
                 )
                 self.history.append(record)
                 self.turn_count += 1
@@ -961,6 +1025,21 @@ class JEDM2Agent:
             coordinates=dispatch_coordinates,
             argument=dispatch_argument,
         )
+
+        # Record executed step into RDTree Process Critic rolling history
+        if self.rdtree_critic is not None and hasattr(self.rdtree_critic, "record_step"):
+            target_el_id = None
+            if candidate_elements:
+                for el in candidate_elements:
+                    el_id = getattr(el, "element_id", None)
+                    if el_id is not None and hasattr(el, "contains") and el.contains(dispatch_coordinates[0], dispatch_coordinates[1]):
+                        target_el_id = el_id
+                        break
+            self.rdtree_critic.record_step(
+                action_type=agent_output.action_type,
+                element_id=target_el_id,
+                coordinates=dispatch_coordinates,
+            )
 
         is_done = step_res.done or agent_output.is_terminal
 
@@ -977,6 +1056,8 @@ class JEDM2Agent:
             is_delta=is_delta,
             delta_tokens_count=delta_tokens_count,
             prefill_savings=prefill_savings,
+            rdtree_diagnostic=agent_output.rdtree_diagnostic,
+            rdtree_reward=agent_output.rdtree_reward,
         )
         self.history.append(record)
 
