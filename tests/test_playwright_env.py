@@ -71,3 +71,25 @@ def test_playwright_env_legacy_mode_toggle():
     step_res = env.step(action_type=ActionType.CLICK, coordinates=(0.25, 0.10))
     assert step_res.obs_text.startswith("URL:")
     assert "<obs delta>" not in step_res.obs_text
+
+
+def test_playwright_env_cdp_script_cache():
+    """Verifies CDPScriptCache integration in PlaywrightEnvironment."""
+    env = PlaywrightEnvironment(mock_mode=True, use_differential_obs=True)
+    assert hasattr(env, "script_cache")
+    assert "extract_elements" in env.script_cache.scripts
+    assert "poll_mutations" in env.script_cache.scripts
+    assert "oracle_check" in env.script_cache.scripts
+
+    env.reset(scenario_id="ecommerce")
+    env.step(action_type=ActionType.CLICK, coordinates=(0.25, 0.10))
+
+    telemetry = env.script_cache.get_telemetry()
+    assert isinstance(telemetry, dict)
+    assert "hits" in telemetry
+    assert "misses" in telemetry
+
+    # Verify invalidation on navigation
+    prev_invals = env.script_cache.stats["invalidations"]
+    env.step(action_type=ActionType.NAVIGATE, argument="https://example.com/new_page")
+    assert env.script_cache.stats["invalidations"] > prev_invals

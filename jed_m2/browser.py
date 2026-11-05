@@ -43,6 +43,7 @@ try:
 except ImportError:
     _HAS_PLAYWRIGHT = False
 
+from jed_m2.cdp_cache import CDPScriptCache
 from jed_m2.config import JEDM2Config
 from jed_m2.core.types import UIElement
 from jed_m2.dom_delta import (
@@ -331,6 +332,8 @@ class PlaywrightEnvironment:
 
         self._prev_elements: List[UIElement] = []
         self._shadow_registry: ShadowDOMRegistry = ShadowDOMRegistry()
+        self.script_cache: CDPScriptCache = CDPScriptCache(enable_cdp_session=True)
+        self._register_default_scripts()
 
         # Scenarios catalog
         self.scenarios = get_default_scenarios()
@@ -380,6 +383,100 @@ class PlaywrightEnvironment:
         self.is_terminated: bool = False
         self.current_goal: str = self.active_scenario.goal
         self._synthetic_dom_fallback: bool = self.mock_mode or not self._browser_available
+
+    def _register_default_scripts(self) -> None:
+        """Pre-registers core browser evaluation routines in CDPScriptCache."""
+        extract_js = """
+        (args) => {
+            const elements = [];
+            const selector = 'button, a[href], input, select, textarea, [role="button"], [role="link"], [role="textbox"], [role="checkbox"], [role="radio"], [role="menuitem"], [tabindex="0"]';
+            const candidates = Array.from(document.querySelectorAll(selector));
+            const vw = window.innerWidth || 1280;
+            const vh = window.innerHeight || 800;
+            const maxElements = (args && args.max_elements) ? args.max_elements : 40;
+            let elemId = 1;
+            for (const el of candidates) {
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                if (rect.bottom < 0 || rect.top > vh || rect.right < 0 || rect.left > vw) continue;
+
+                const x_min = Math.max(0.0, Math.min(1.0, rect.left / vw));
+                const y_min = Math.max(0.0, Math.min(1.0, rect.top / vh));
+                const x_max = Math.max(0.0, Math.min(1.0, rect.right / vw));
+                const y_max = Math.max(0.0, Math.min(1.0, rect.bottom / vh));
+
+                const tag = el.tagName.toLowerCase();
+                let role = el.getAttribute('role') || '';
+                if (!role) {
+                    if (tag === 'button') role = 'button';
+                    else if (tag === 'a') role = 'link';
+                    else if (tag === 'input') {
+                        const type = (el.getAttribute('type') || 'text').toLowerCase();
+                        role = (type === 'submit' || type === 'button') ? 'button' : 'input';
+                    }
+                    else if (tag === 'textarea') role = 'input';
+                    else if (tag === 'select') role = 'dropdown';
+                    else role = 'element';
+                }
+
+                let text = (el.innerText || el.textContent || '').trim();
+                if (!text && el.getAttribute('aria-label')) text = el.getAttribute('aria-label').trim();
+                if (!text && el.getAttribute('placeholder')) text = el.getAttribute('placeholder').trim();
+                if (!text && el.getAttribute('title')) text = el.getAttribute('title').trim();
+                if (!text && el.getAttribute('value')) text = el.getAttribute('value').trim();
+                if (!text) text = role || tag;
+                text = text.substring(0, 50).replace(/\\s+/g, ' ');
+
+                const is_input = (tag === 'input' || tag === 'textarea' || role === 'textbox' || role === 'input');
+                const is_clickable = true;
+                const value = (el.value || '').substring(0, 50);
+
+                elements.push({
+                    element_id: elemId++,
+                    tag: tag,
+                    role: role,
+                    text: text,
+                    bbox: [x_min, y_min, x_max, y_max],
+                    value: value,
+                    is_clickable: is_clickable,
+                    is_input: is_input,
+                });
+
+                if (elements.length >= maxElements) break;
+            }
+            return elements;
+        }
+        """
+        self.script_cache.register("extract_elements", extract_js)
+
+        poll_js = """
+        (args) => {
+            if (!window.__jed_mutations__) return [];
+            const muts = window.__jed_mutations__;
+            window.__jed_mutations__ = [];
+            return muts;
+        }
+        """
+        self.script_cache.register("poll_mutations", poll_js)
+
+        oracle_js = """
+        (args) => {
+            const results = [];
+            const selectors = (args && args.selectors) ? args.selectors : [];
+            for (const sel of selectors) {
+                try {
+                    const el = document.querySelector(sel);
+                    results.push({ selector: sel, found: (el !== null) });
+                } catch (e) {
+                    results.push({ selector: sel, found: false });
+                }
+            }
+            return results;
+        }
+        """
+        self.script_cache.register("oracle_check", oracle_js)
 
     # --------------------------------------------------------------------------
     # Browser Lifecycle Management
@@ -506,104 +603,25 @@ class PlaywrightEnvironment:
 
     def extract_interactive_elements(self) -> List[UIElement]:
         """
-        Scans DOM for visible interactive elements (buttons, inputs, links, selects, textareas).
+        Scans DOM for visible interactive elements (buttons, inputs, links, selects, textareas)
+        using pre-compiled cached JavaScript evaluation routine.
         Computes client bounding boxes and normalizes them to [0, 1] relative to the viewport.
         """
         page = self._ensure_browser()
         if page is None or self._synthetic_dom_fallback:
             return self._get_fallback_elements()
 
-        js_query = """
-        () => {
-            const elements = [];
-            const selector = 'button, a[href], input, select, textarea, [role="button"], [role="link"], [role="textbox"], [role="checkbox"], [role="radio"], [role="menuitem"], [tabindex="0"]';
-            const candidates = Array.from(document.querySelectorAll(selector));
-            
-            const vw = window.innerWidth || 1280;
-            const vh = window.innerHeight || 800;
-
-            let elemId = 1;
-            for (const el of candidates) {
-                const style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-                    continue;
-                }
-                
-                const rect = el.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) {
-                    continue;
-                }
-                
-                if (rect.bottom < 0 || rect.top > vh || rect.right < 0 || rect.left > vw) {
-                    continue;
-                }
-
-                const x_min = Math.max(0.0, Math.min(1.0, rect.left / vw));
-                const y_min = Math.max(0.0, Math.min(1.0, rect.top / vh));
-                const x_max = Math.max(0.0, Math.min(1.0, rect.right / vw));
-                const y_max = Math.max(0.0, Math.min(1.0, rect.bottom / vh));
-
-                const tag = el.tagName.toLowerCase();
-                let role = el.getAttribute('role') || '';
-                if (!role) {
-                    if (tag === 'button') role = 'button';
-                    else if (tag === 'a') role = 'link';
-                    else if (tag === 'input') {
-                        const type = (el.getAttribute('type') || 'text').toLowerCase();
-                        role = (type === 'submit' || type === 'button') ? 'button' : 'input';
-                    }
-                    else if (tag === 'textarea') role = 'input';
-                    else if (tag === 'select') role = 'dropdown';
-                    else role = 'element';
-                }
-
-                let text = (el.innerText || el.textContent || '').trim();
-                if (!text && el.getAttribute('aria-label')) {
-                    text = el.getAttribute('aria-label').trim();
-                }
-                if (!text && el.getAttribute('placeholder')) {
-                    text = el.getAttribute('placeholder').trim();
-                }
-                if (!text && el.getAttribute('title')) {
-                    text = el.getAttribute('title').trim();
-                }
-                if (!text && el.getAttribute('value')) {
-                    text = el.getAttribute('value').trim();
-                }
-                if (!text) {
-                    text = role || tag;
-                }
-                text = text.substring(0, 50).replace(/\\s+/g, ' ');
-
-                const is_input = (tag === 'input' || tag === 'textarea' || role === 'textbox' || role === 'input');
-                const is_clickable = true;
-                const value = (el.value || '').substring(0, 50);
-
-                elements.push({
-                    element_id: elemId++,
-                    tag: tag,
-                    role: role,
-                    text: text,
-                    bbox: [x_min, y_min, x_max, y_max],
-                    value: value,
-                    is_clickable: is_clickable,
-                    is_input: is_input,
-                });
-
-                if (elements.length >= 40) {
-                    break;
-                }
-            }
-            return elements;
-        }
-        """
-
         try:
-            raw_elements = page.evaluate(js_query)
+            raw_elements = self.script_cache.evaluate(
+                page,
+                "extract_elements",
+                args={"max_elements": 40},
+                fallback_fn=self._get_fallback_elements,
+            )
         except Exception:
             raw_elements = []
 
-        if not raw_elements:
+        if not raw_elements or not isinstance(raw_elements, list):
             return self._get_fallback_elements()
 
         ui_elements: List[UIElement] = []
@@ -734,10 +752,15 @@ class PlaywrightEnvironment:
             return None
 
     def _poll_browser_mutations(self) -> List[Dict[str, Any]]:
-        """Clears and returns accumulated in-browser mutation records."""
+        """Clears and returns accumulated in-browser mutation records via cached routine."""
         if self._page is not None and not self._synthetic_dom_fallback:
             try:
-                return self._page.evaluate(BROWSER_MUTATION_POLL_JS) or []
+                res = self.script_cache.evaluate(
+                    self._page,
+                    "poll_mutations",
+                    fallback_fn=list,
+                )
+                return res if isinstance(res, list) else []
             except Exception:
                 return []
         return []
@@ -876,6 +899,7 @@ class PlaywrightEnvironment:
         self.action_history.clear()
         self.goal_satisfied = False
         self.is_terminated = False
+        self.script_cache.invalidate()
 
         page = self._ensure_browser()
 
@@ -1164,6 +1188,8 @@ class PlaywrightEnvironment:
         self.action_history.append(action_log)
 
         is_nav = (act_enum == ActionType.NAVIGATE or curr_url != self.current_state.url)
+        if is_nav:
+            self.script_cache.invalidate()
         obs_text, delta_record = self._format_observation(is_delta=True, is_nav=is_nav)
         if action_error:
             obs_text = f"[Action Error: {action_error}]\n{obs_text}"
