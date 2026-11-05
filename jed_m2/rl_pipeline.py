@@ -152,6 +152,8 @@ class TrajectoryRolloutSampler:
         temperature: float = 0.7,
         max_turns: int = 8,
         scenario_id: Optional[str] = None,
+        outcome_supervised: bool = False,
+        obstacle_prob: float = 0.0,
     ) -> RolloutTrajectory:
         """
         Executes a single interactive episode in WebOSEnvironment with temperature-scaled exploration.
@@ -208,6 +210,15 @@ class TrajectoryRolloutSampler:
             turn_tokens: List[int] = []
             turn_mask: List[bool] = []
 
+            # Optional procedural obstacle injection for error recovery training
+            if obstacle_prob > 0.0 and turn_idx == 1 and hasattr(env, "obstacle_state"):
+                if getattr(env, "obstacle_state", None) is None or not env.obstacle_state.active:
+                    from jed_m2.scenario_generator import ObstacleInjector
+                    injector = getattr(env, "obstacle_injector", None) or ObstacleInjector(default_prob=obstacle_prob)
+                    injector.maybe_inject(env, prob=obstacle_prob)
+                    if hasattr(env, "get_observation_text"):
+                        obs_text = env.get_observation_text()
+
             # ------------------------------------------------------------------
             # 1. Observation Prompt Ingestion (budget up to 256 tokens)
             # ------------------------------------------------------------------
@@ -219,21 +230,30 @@ class TrajectoryRolloutSampler:
             turn_tokens.extend(obs_tokens)
             turn_mask.extend([False] * len(obs_tokens))
 
-            # Step model recurrently through observation tokens
-            last_lm_logits = None
-            last_action_out = None
-            obs_tensor = torch.tensor(obs_tokens, device=self.device, dtype=torch.long)
-            for i in range(len(obs_tokens)):
+            # Step model through observation tokens using parallel prefill when available
+            if hasattr(self.model, "prefill"):
+                obs_tensor = torch.tensor(obs_tokens, device=self.device, dtype=torch.long).unsqueeze(0)
                 with torch.no_grad():
-                    last_lm_logits, last_action_out, recurrent_states = self.model.step(
-                        obs_tensor[i : i + 1],
+                    lm_logits, action_output, recurrent_states = self.model.prefill(
+                        obs_tensor,
                         states=recurrent_states,
-                        pos=current_pos,
+                        start_pos=current_pos,
                     )
-                current_pos += 1
-
-            lm_logits = last_lm_logits
-            action_output = last_action_out
+                current_pos += len(obs_tokens)
+            else:
+                last_lm_logits = None
+                last_action_out = None
+                obs_tensor = torch.tensor(obs_tokens, device=self.device, dtype=torch.long)
+                for i in range(len(obs_tokens)):
+                    with torch.no_grad():
+                        last_lm_logits, last_action_out, recurrent_states = self.model.step(
+                            obs_tensor[i : i + 1],
+                            states=recurrent_states,
+                            pos=current_pos,
+                        )
+                    current_pos += 1
+                lm_logits = last_lm_logits
+                action_output = last_action_out
 
             # ------------------------------------------------------------------
             # 2. System 2: Autoregressive Latent Reasoning with Temperature
@@ -482,15 +502,41 @@ class TrajectoryRolloutSampler:
         all_tokens.append(self.tokenizer.EOS_TOKEN_ID)
         all_mask.append(False)
 
-        # Post-hoc evaluation oracle: CompletionReferee assesses milestone achievement after episode conclusion
+        # Post-hoc evaluation oracle: CompletionReferee and ProgrammaticReferee assess milestone achievement
         final_action = turns[-1].action_type if turns else None
-        goal_satisfied = bool(getattr(env, "goal_satisfied", False) or CompletionReferee.is_goal_satisfied(env))
+        try:
+            from jed_m2.scenario_generator import verify_environment_outcome
+            verification = verify_environment_outcome(env)
+            ver_satisfied = verification.goal_satisfied
+            ver_milestones = len(verification.milestones_achieved)
+        except Exception:
+            ver_satisfied = False
+            ver_milestones = len(getattr(env, "milestones_achieved", []))
+
+        goal_satisfied = bool(ver_satisfied or getattr(env, "goal_satisfied", False) or CompletionReferee.is_goal_satisfied(env))
         if goal_satisfied and hasattr(env, "goal_satisfied"):
             env.goal_satisfied = True
 
-        # Autonomous success requires both milestone satisfaction AND autonomous FINISH emission
-        is_success = bool(goal_satisfied and final_action == ActionType.FINISH)
-        terminal_reward = 1.0 if is_success else 0.0
+        # Autonomous success requires milestone satisfaction AND autonomous FINISH emission (or environment goal satisfied)
+        is_success = bool(goal_satisfied and (final_action == ActionType.FINISH or goal_satisfied))
+
+        if outcome_supervised:
+            repeated_count = sum(
+                1 for i in range(1, len(turns))
+                if turns[i].action_type == turns[i - 1].action_type
+                and math.hypot(turns[i].coordinates[0] - turns[i - 1].coordinates[0], turns[i].coordinates[1] - turns[i - 1].coordinates[1]) < 0.05
+            )
+            terminal_reward = compute_shaped_reward(
+                goal_satisfied=is_success,
+                milestones_count=ver_milestones,
+                turn_count=len(turns),
+                repeated_action_count=repeated_count,
+                terminal_action=final_action,
+                outcome_supervised=True,
+            )
+        else:
+            terminal_reward = 1.0 if is_success else 0.0
+
         cumulative_reward = float(env.current_state.cumulative_reward) if env.current_state else 0.0
 
         return RolloutTrajectory(
@@ -516,6 +562,8 @@ class TrajectoryRolloutSampler:
         seed: Optional[int] = None,
         env_type: str = "webos",
         browser_env: Optional[Any] = None,
+        outcome_supervised: bool = False,
+        obstacle_prob: float = 0.0,
     ) -> List[RolloutTrajectory]:
         """
         Samples a group of G rollout trajectories for a single scenario goal for GRPO.
@@ -599,6 +647,8 @@ class TrajectoryRolloutSampler:
                     temperature=temperature,
                     max_turns=max_turns,
                     scenario_id=fixed_task_id,
+                    outcome_supervised=outcome_supervised,
+                    obstacle_prob=obstacle_prob,
                 )
                 group.append(traj)
 
@@ -614,7 +664,13 @@ class TrajectoryRolloutSampler:
                     device=self.device,
                     dtype=self.dtype,
                 )
-            traj = self.sample_trajectory(env, temperature=temperature, max_turns=max_turns)
+            traj = self.sample_trajectory(
+                env,
+                temperature=temperature,
+                max_turns=max_turns,
+                outcome_supervised=outcome_supervised,
+                obstacle_prob=obstacle_prob,
+            )
             group.append(traj)
 
         return group
@@ -748,7 +804,7 @@ class TrajectoryRolloutSampler:
                     terminal_action=terminal_act,
                 )
                 raw_rewards.append(shaped_r)
-            elif reward_mode == "terminal":
+            elif reward_mode in ("terminal", "outcome"):
                 raw_rewards.append(traj.terminal_reward)
             else:
                 raw_rewards.append(traj.cumulative_reward)

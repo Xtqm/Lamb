@@ -139,8 +139,219 @@ class CatalogItem:
         return round(self.price * (1.0 - self.discount_pct / 100.0), 2)
 
 
+# ==============================================================================
+# 1b. Procedural Obstacle & Adversarial Noise Engine
+# ==============================================================================
+
+@dataclass
+class ObstacleState:
+    """Represents an active procedural obstacle or UI friction element."""
+
+    obstacle_type: str = "none"  # "cookie_consent", "validation_error", "loading_delay", "promo_popup"
+    active: bool = False
+    message: str = ""
+    dismiss_role: str = ""
+    delay_remaining: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "obstacle_type": self.obstacle_type,
+            "active": self.active,
+            "message": self.message,
+            "dismiss_role": self.dismiss_role,
+            "delay_remaining": self.delay_remaining,
+        }
+
+
+class ObstacleInjector:
+    """
+    Procedural obstacle and adversarial noise injection engine.
+    Injects cookie consent overlays, client-side input validation errors,
+    asynchronous loading delays, and promotional popups.
+    """
+
+    OBSTACLE_TYPES = ["cookie_consent", "validation_error", "loading_delay", "promo_popup"]
+
+    def __init__(self, default_prob: float = 0.35, rng: Optional[random.Random] = None):
+        self.default_prob = default_prob
+        self.rng = rng or random
+
+    def maybe_inject(self, env: "ProceduralEnvironment", prob: Optional[float] = None) -> Optional[ObstacleState]:
+        """Probabilistically injects an obstacle into the environment if none is active."""
+        p = prob if prob is not None else self.default_prob
+        if getattr(env, "obstacle_state", None) is not None and env.obstacle_state.active:
+            return env.obstacle_state
+        if self.rng.random() < p:
+            obs_type = self.rng.choice(self.OBSTACLE_TYPES)
+            return self.inject_obstacle(env, obstacle_type=obs_type)
+        return None
+
+    def inject_obstacle(
+        self,
+        env: "ProceduralEnvironment",
+        obstacle_type: str = "cookie_consent",
+    ) -> ObstacleState:
+        """Injects a specific obstacle into the given procedural environment."""
+        if obstacle_type == "cookie_consent":
+            state = ObstacleState(
+                obstacle_type="cookie_consent",
+                active=True,
+                message="Cookie consent modal active; user must accept or dismiss to interact with page.",
+                dismiss_role="cookie_accept_btn",
+            )
+        elif obstacle_type == "validation_error":
+            state = ObstacleState(
+                obstacle_type="validation_error",
+                active=True,
+                message="Client-side validation error banner active; user must correct input or dismiss alert.",
+                dismiss_role="dismiss_validation_btn",
+            )
+        elif obstacle_type == "loading_delay":
+            state = ObstacleState(
+                obstacle_type="loading_delay",
+                active=True,
+                message="Simulated asynchronous loading delay; page components settling.",
+                dismiss_role="spinner_overlay",
+                delay_remaining=1,
+            )
+        elif obstacle_type == "promo_popup":
+            state = ObstacleState(
+                obstacle_type="promo_popup",
+                active=True,
+                message="Promotional newsletter modal active; close icon must be clicked.",
+                dismiss_role="promo_close_btn",
+            )
+        else:
+            state = ObstacleState(obstacle_type="none", active=False)
+
+        env.obstacle_state = state
+        if env.current_state is not None:
+            env.current_state.metadata["obstacle"] = state.to_dict()
+            env.current_state.elements = env._build_page_elements()
+        return state
+
+    @staticmethod
+    def get_obstacle_elements(obstacle_state: ObstacleState, start_id: int) -> List[UIElement]:
+        """Synthesizes DOM elements representing the active obstacle overlay."""
+        elements: List[UIElement] = []
+        el_id = start_id
+
+        if not obstacle_state.active:
+            return elements
+
+        if obstacle_state.obstacle_type == "cookie_consent":
+            # Modal backdrop and dialog buttons
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="div",
+                    role="cookie_consent_modal",
+                    text="We value your privacy. This site uses cookies to ensure optimal performance.",
+                    bbox=(0.10, 0.40, 0.90, 0.58),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="cookie_accept_btn",
+                    text="Accept All Cookies",
+                    bbox=(0.22, 0.50, 0.48, 0.56),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="cookie_dismiss_btn",
+                    text="Dismiss",
+                    bbox=(0.52, 0.50, 0.78, 0.56),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+
+        elif obstacle_state.obstacle_type == "validation_error":
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="div",
+                    role="validation_error_alert",
+                    text="Validation Alert: Please verify required fields and format before proceeding.",
+                    bbox=(0.10, 0.12, 0.72, 0.18),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="dismiss_validation_btn",
+                    text="Dismiss Error",
+                    bbox=(0.75, 0.12, 0.90, 0.18),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+
+        elif obstacle_state.obstacle_type == "loading_delay":
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="div",
+                    role="spinner_overlay",
+                    text="Loading requested resource... please wait.",
+                    bbox=(0.25, 0.42, 0.75, 0.52),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+
+        elif obstacle_state.obstacle_type == "promo_popup":
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="div",
+                    role="promo_popup_modal",
+                    text="Exclusive Offer! Sign up today for 20% off your transaction.",
+                    bbox=(0.15, 0.32, 0.85, 0.52),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="promo_close_btn",
+                    text="[X] Close",
+                    bbox=(0.78, 0.33, 0.84, 0.38),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+
+        return elements
+
+
 class ProceduralEnvironment(WebOSEnvironment):
-    """Base class for procedural simulated environments providing step result formatting."""
+    """Base class for procedural simulated environments providing step result formatting and obstacle interception."""
+
+    def __init__(
+        self,
+        config: Optional[JEDM2Config] = None,
+        scenario_id: str = "procedural",
+        device: Union[str, torch.device] = "cpu",
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__(config=config, scenario_id=scenario_id, device=device, dtype=dtype)
+        self.obstacle_state: Optional[ObstacleState] = None
+        self.obstacle_injector: Optional[ObstacleInjector] = None
 
     @property
     def elements(self) -> List[UIElement]:
@@ -154,6 +365,14 @@ class ProceduralEnvironment(WebOSEnvironment):
     def get_observation_features(self) -> torch.Tensor:
         return self._generate_obs_features()
 
+    def _format_observation_text(self) -> str:
+        """Serializes observation text with explicit obstacle signals when active."""
+        base_text = super()._format_observation_text()
+        if self.obstacle_state is not None and self.obstacle_state.active:
+            obs_cue = f"[OBSTACLE: {self.obstacle_state.obstacle_type}] {self.obstacle_state.message} | "
+            base_text = obs_cue + base_text
+        return base_text
+
     def _format_step_result(
         self,
         reward: float,
@@ -163,14 +382,62 @@ class ProceduralEnvironment(WebOSEnvironment):
     ) -> StepResult:
         obs_text = self._format_observation_text()
         obs_features = self._generate_obs_features()
+        merged_info = dict(info or {})
+        if self.obstacle_state is not None and self.obstacle_state.active:
+            merged_info["obstacle"] = self.obstacle_state.to_dict()
         return StepResult(
             obs_text=obs_text,
             obs_features=obs_features,
             reward=reward,
             done=done,
             truncated=truncated,
-            info=info or {},
+            info=merged_info,
         )
+
+    def handle_obstacle_step(
+        self,
+        action_type: ActionType,
+        coordinates: Optional[Tuple[float, float]],
+        hit_el: Optional[UIElement],
+    ) -> Tuple[bool, bool, float]:
+        """
+        Evaluates whether an active obstacle intercepts or is resolved by the agent's action.
+        Returns:
+            (is_intercepted, obstacle_dismissed, reward_bonus)
+        """
+        if self.obstacle_state is None or not self.obstacle_state.active:
+            return False, False, 0.0
+
+        if self.obstacle_state.obstacle_type == "loading_delay":
+            if self.obstacle_state.delay_remaining > 0:
+                self.obstacle_state.delay_remaining -= 1
+                if self.obstacle_state.delay_remaining <= 0:
+                    self.obstacle_state.active = False
+                    if hasattr(self, "milestones_achieved"):
+                        self.milestones_achieved.add("obstacle_dismissed")
+                    return True, True, 0.15
+            else:
+                self.obstacle_state.active = False
+            return True, True, 0.0
+
+        dismiss_roles = {
+            "cookie_consent": ("cookie_accept_btn", "cookie_dismiss_btn"),
+            "validation_error": ("dismiss_validation_btn",),
+            "promo_popup": ("promo_close_btn",),
+        }
+        valid_roles = dismiss_roles.get(self.obstacle_state.obstacle_type, ())
+
+        if hit_el is not None and hit_el.role in valid_roles:
+            self.obstacle_state.active = False
+            if hasattr(self, "milestones_achieved"):
+                self.milestones_achieved.add("obstacle_dismissed")
+            return False, True, 0.15
+
+        # If obstacle is modal or backdrop and click did not resolve it, intercept click
+        if self.obstacle_state.obstacle_type in ("cookie_consent", "promo_popup", "validation_error"):
+            return True, False, 0.0
+
+        return False, False, 0.0
 
 
 class DynamicEcommerceEnvironment(ProceduralEnvironment):
@@ -454,6 +721,11 @@ class DynamicEcommerceEnvironment(ProceduralEnvironment):
             )
             el_id += 1
 
+        # Add obstacle elements if active
+        if getattr(self, "obstacle_state", None) is not None and self.obstacle_state.active:
+            elements.extend(ObstacleInjector.get_obstacle_elements(self.obstacle_state, start_id=el_id))
+            el_id += 5
+
         # Add distractor elements
         distractors = generate_distractor_elements(start_id=el_id, num_distractors=3, rng=self.rng)
         elements.extend(distractors)
@@ -481,6 +753,18 @@ class DynamicEcommerceEnvironment(ProceduralEnvironment):
                 if el.is_clickable and el.contains(cx, cy):
                     hit_el = el
                     break
+
+        intercepted, dismissed, obs_reward = self.handle_obstacle_step(action_type, coordinates, hit_el)
+        if dismissed:
+            reward += obs_reward
+        if intercepted:
+            self.current_state.elements = self._build_page_elements()
+            self.current_state.cumulative_reward += reward
+            truncated = self.current_state.step_count >= self.active_scenario.max_steps
+            if truncated:
+                done = True
+            self.is_terminated = done
+            return self._format_step_result(reward=reward, done=done, truncated=truncated)
 
         if action_type == ActionType.TYPE:
             if hit_el and hit_el.is_input:
@@ -774,6 +1058,11 @@ class DynamicFormPortalEnvironment(ProceduralEnvironment):
             )
             el_id += 1
 
+        # Add obstacle elements if active
+        if getattr(self, "obstacle_state", None) is not None and self.obstacle_state.active:
+            elements.extend(ObstacleInjector.get_obstacle_elements(self.obstacle_state, start_id=el_id))
+            el_id += 5
+
         # Distractor elements
         distractors = generate_distractor_elements(start_id=el_id, num_distractors=2, rng=self.rng)
         elements.extend(distractors)
@@ -801,6 +1090,18 @@ class DynamicFormPortalEnvironment(ProceduralEnvironment):
                 if el.is_clickable and el.contains(cx, cy):
                     hit_el = el
                     break
+
+        intercepted, dismissed, obs_reward = self.handle_obstacle_step(action_type, coordinates, hit_el)
+        if dismissed:
+            reward += obs_reward
+        if intercepted:
+            self.current_state.elements = self._build_page_elements()
+            self.current_state.cumulative_reward += reward
+            truncated = self.current_state.step_count >= self.active_scenario.max_steps
+            if truncated:
+                done = True
+            self.is_terminated = done
+            return self._format_step_result(reward=reward, done=done, truncated=truncated)
 
         if action_type == ActionType.TYPE:
             if hit_el and hit_el.is_input:
@@ -1045,6 +1346,11 @@ class DynamicCloudAdminEnvironment(ProceduralEnvironment):
             )
             el_id += 1
 
+        # Add obstacle elements if active
+        if getattr(self, "obstacle_state", None) is not None and self.obstacle_state.active:
+            elements.extend(ObstacleInjector.get_obstacle_elements(self.obstacle_state, start_id=el_id))
+            el_id += 5
+
         distractors = generate_distractor_elements(start_id=el_id, num_distractors=2, rng=self.rng)
         elements.extend(distractors)
 
@@ -1070,6 +1376,18 @@ class DynamicCloudAdminEnvironment(ProceduralEnvironment):
                 if el.is_clickable and el.contains(cx, cy):
                     hit_el = el
                     break
+
+        intercepted, dismissed, obs_reward = self.handle_obstacle_step(action_type, coordinates, hit_el)
+        if dismissed:
+            reward += obs_reward
+        if intercepted:
+            self.current_state.elements = self._build_page_elements()
+            self.current_state.cumulative_reward += reward
+            truncated = self.current_state.step_count >= self.active_scenario.max_steps
+            if truncated:
+                done = True
+            self.is_terminated = done
+            return self._format_step_result(reward=reward, done=done, truncated=truncated)
 
         if action_type == ActionType.TYPE:
             if hit_el and hit_el.is_input:
@@ -1250,6 +1568,11 @@ class DynamicWebBrowserEnvironment(ProceduralEnvironment):
             )
             el_id += 1
 
+        # Add obstacle elements if active
+        if getattr(self, "obstacle_state", None) is not None and self.obstacle_state.active:
+            elements.extend(ObstacleInjector.get_obstacle_elements(self.obstacle_state, start_id=el_id))
+            el_id += 5
+
         distractors = generate_distractor_elements(start_id=el_id, num_distractors=2, rng=self.rng)
         elements.extend(distractors)
 
@@ -1275,6 +1598,18 @@ class DynamicWebBrowserEnvironment(ProceduralEnvironment):
                 if el.is_clickable and el.contains(cx, cy):
                     hit_el = el
                     break
+
+        intercepted, dismissed, obs_reward = self.handle_obstacle_step(action_type, coordinates, hit_el)
+        if dismissed:
+            reward += obs_reward
+        if intercepted:
+            self.current_state.elements = self._build_page_elements()
+            self.current_state.cumulative_reward += reward
+            truncated = self.current_state.step_count >= self.active_scenario.max_steps
+            if truncated:
+                done = True
+            self.is_terminated = done
+            return self._format_step_result(reward=reward, done=done, truncated=truncated)
 
         if action_type == ActionType.CLICK:
             if hit_el:
@@ -1330,20 +1665,1140 @@ class DynamicWebBrowserEnvironment(ProceduralEnvironment):
 
 
 # ==============================================================================
-# 6. Dynamic Scenario Generator Factory
+# 5. Dynamic Travel Booking Procedural Environment
+# ==============================================================================
+
+@dataclass
+class FlightBookingRecord:
+    """Represents a confirmed flight booking reservation record."""
+
+    booking_id: str
+    origin: str
+    destination: str
+    departure_date: str
+    flight_number: str
+    seat: str
+    passenger_name: str
+    passenger_email: str
+    add_ons: List[str]
+    total_price: float
+    confirmed: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "booking_id": self.booking_id,
+            "origin": self.origin,
+            "destination": self.destination,
+            "departure_date": self.departure_date,
+            "flight_number": self.flight_number,
+            "seat": self.seat,
+            "passenger_name": self.passenger_name,
+            "passenger_email": self.passenger_email,
+            "add_ons": self.add_ons,
+            "total_price": self.total_price,
+            "confirmed": self.confirmed,
+        }
+
+
+class DynamicBookingEnvironment(ProceduralEnvironment):
+    """
+    Multi-Step Travel Booking Procedural Sandbox.
+    Features:
+    - Route searching with origin, destination, and calendar departure date.
+    - Tier/flight option selection with dynamic pricing.
+    - Passenger detail entry, interactive seat selection grid, and baggage add-on toggles.
+    - Deterministic review and booking confirmation reference generation.
+    """
+
+    AIRPORTS = ["SFO", "JFK", "LAX", "ORD", "SEA", "BOS", "MIA", "AUS"]
+    PASSENGERS = ["Alex Chen", "Jordan Taylor", "Sam Rivera", "Morgan Lee", "Chris Zhang"]
+    SEATS = ["12A", "12B", "14A", "14B", "16C", "16D"]
+
+    def __init__(
+        self,
+        config: Optional[JEDM2Config] = None,
+        seed: Optional[int] = None,
+        device: Union[str, torch.device] = "cpu",
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__(config=config, scenario_id="travel_booking", device=device, dtype=dtype)
+        self.seed = seed if seed is not None else random.randint(1000, 999999)
+        self.rng = random.Random(self.seed)
+
+        self.target_origin = self.rng.choice(self.AIRPORTS)
+        dest_choices = [a for a in self.AIRPORTS if a != self.target_origin]
+        self.target_destination = self.rng.choice(dest_choices)
+        self.target_date = "2026-11-20"
+        self.target_passenger_name = self.rng.choice(self.PASSENGERS)
+        self.target_passenger_email = f"{self.target_passenger_name.lower().replace(' ', '.')}@example.com"
+        self.target_flight_number = f"FL-{self.rng.randint(100, 999)}"
+
+        self.booking_stage = "search"  # search, flights, details, review, complete
+        self.origin_input = ""
+        self.dest_input = ""
+        self.date_input = ""
+        self.passenger_name_input = ""
+        self.passenger_email_input = ""
+        self.selected_flight: Optional[Dict[str, Any]] = None
+        self.selected_seat: Optional[str] = None
+        self.add_ons: List[str] = []
+        self.confirmed_booking: Optional[FlightBookingRecord] = None
+        self.milestones_achieved: Set[str] = set()
+
+        self.flights = self._generate_flights()
+
+        self.active_scenario = ScenarioDefinition(
+            scenario_id=f"dynamic_booking_{self.seed}",
+            domain="travel_booking",
+            goal=(
+                f"Search flights from '{self.target_origin}' to '{self.target_destination}', "
+                f"select flight '{self.target_flight_number}', enter passenger '{self.target_passenger_name}', "
+                f"and confirm booking"
+            ),
+            initial_url="https://travel.booking.internal/search",
+            initial_title="Global Travel - Flight Booking Portal",
+            max_steps=12,
+        )
+        self.reset()
+
+    def _generate_flights(self) -> List[Dict[str, Any]]:
+        flights = [
+            {
+                "number": self.target_flight_number,
+                "origin": self.target_origin,
+                "destination": self.target_destination,
+                "time": "08:30 AM - 04:45 PM",
+                "price": float(self.rng.randint(240, 420)),
+                "stops": "Nonstop",
+            }
+        ]
+        other_nums = [f"FL-{self.rng.randint(100, 999)}" for _ in range(2)]
+        for fn in other_nums:
+            if fn != self.target_flight_number:
+                flights.append(
+                    {
+                        "number": fn,
+                        "origin": self.target_origin,
+                        "destination": self.target_destination,
+                        "time": "01:15 PM - 09:30 PM",
+                        "price": float(self.rng.randint(190, 380)),
+                        "stops": "1 Stop",
+                    }
+                )
+        self.rng.shuffle(flights)
+        return flights
+
+    def reset(self) -> StepResult:
+        self.action_history.clear()
+        self.goal_satisfied = False
+        self.is_terminated = False
+        self.booking_stage = "search"
+        self.origin_input = ""
+        self.dest_input = ""
+        self.date_input = ""
+        self.passenger_name_input = ""
+        self.passenger_email_input = ""
+        self.selected_flight = None
+        self.selected_seat = None
+        self.add_ons = []
+        self.confirmed_booking = None
+        self.milestones_achieved.clear()
+
+        elements = self._build_page_elements()
+        self.current_state = EnvironmentState(
+            url=f"https://travel.booking.internal/{self.booking_stage}",
+            title=f"Global Travel - {self.booking_stage.capitalize()}",
+            scroll_offset_y=0.0,
+            elements=elements,
+            step_count=0,
+            cumulative_reward=0.0,
+            last_action_str="INITIAL",
+            last_action_success=True,
+            metadata={"seed": self.seed, "stage": self.booking_stage},
+        )
+        return self._format_step_result(reward=0.0, done=False, truncated=False)
+
+    def _build_page_elements(self) -> List[UIElement]:
+        elements: List[UIElement] = []
+        el_id = 1
+
+        if self.booking_stage == "search":
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="h2",
+                    role="header",
+                    text="Flight Search Portal",
+                    bbox=(0.10, 0.05, 0.70, 0.12),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="input",
+                    role="origin_input",
+                    text=self.origin_input or "Enter departure city or airport",
+                    bbox=apply_bbox_jitter((0.10, 0.16, 0.45, 0.24), rng=self.rng),
+                    value=self.origin_input,
+                    is_clickable=True,
+                    is_input=True,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="input",
+                    role="dest_input",
+                    text=self.dest_input or "Enter arrival city or airport",
+                    bbox=apply_bbox_jitter((0.55, 0.16, 0.90, 0.24), rng=self.rng),
+                    value=self.dest_input,
+                    is_clickable=True,
+                    is_input=True,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="input",
+                    role="date_input",
+                    text=self.date_input or self.target_date,
+                    bbox=apply_bbox_jitter((0.10, 0.28, 0.45, 0.36), rng=self.rng),
+                    value=self.date_input,
+                    is_clickable=True,
+                    is_input=True,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="search_flights_btn",
+                    text="Search Flights",
+                    bbox=apply_bbox_jitter((0.55, 0.28, 0.90, 0.36), rng=self.rng),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+
+        elif self.booking_stage == "flights":
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="h2",
+                    role="header",
+                    text=f"Available Flights: {self.origin_input or self.target_origin} to {self.dest_input or self.target_destination}",
+                    bbox=(0.10, 0.05, 0.90, 0.12),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+
+            y_pos = 0.16
+            for fl in self.flights:
+                elements.append(
+                    UIElement(
+                        element_id=el_id,
+                        tag="div",
+                        role=f"flight_card_{fl['number']}",
+                        text=f"{fl['number']} | {fl['time']} | {fl['stops']} | ${fl['price']:.2f}",
+                        bbox=apply_bbox_jitter((0.10, y_pos, 0.65, y_pos + 0.12), rng=self.rng),
+                        is_clickable=False,
+                    )
+                )
+                el_id += 1
+                elements.append(
+                    UIElement(
+                        element_id=el_id,
+                        tag="button",
+                        role=f"select_flight_{fl['number']}",
+                        text=f"Select {fl['number']}",
+                        bbox=apply_bbox_jitter((0.68, y_pos + 0.02, 0.90, y_pos + 0.10), rng=self.rng),
+                        is_clickable=True,
+                    )
+                )
+                el_id += 1
+                y_pos += 0.16
+
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="back_to_search_btn",
+                    text="< Modify Search",
+                    bbox=(0.10, y_pos, 0.35, y_pos + 0.08),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+
+        elif self.booking_stage == "details":
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="h2",
+                    role="header",
+                    text=f"Passenger Details & Seat: Flight {self.selected_flight['number'] if self.selected_flight else self.target_flight_number}",
+                    bbox=(0.10, 0.05, 0.90, 0.12),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="input",
+                    role="passenger_name_input",
+                    text=self.passenger_name_input or "Full Passenger Name",
+                    bbox=apply_bbox_jitter((0.10, 0.16, 0.45, 0.24), rng=self.rng),
+                    value=self.passenger_name_input,
+                    is_clickable=True,
+                    is_input=True,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="input",
+                    role="passenger_email_input",
+                    text=self.passenger_email_input or "Email Address",
+                    bbox=apply_bbox_jitter((0.55, 0.16, 0.90, 0.24), rng=self.rng),
+                    value=self.passenger_email_input,
+                    is_clickable=True,
+                    is_input=True,
+                )
+            )
+            el_id += 1
+
+            # Seat buttons
+            x_seat = 0.10
+            for s in self.SEATS[:4]:
+                elements.append(
+                    UIElement(
+                        element_id=el_id,
+                        tag="button",
+                        role=f"select_seat_{s}",
+                        text=f"Seat {s}" + (" [Selected]" if self.selected_seat == s else ""),
+                        bbox=apply_bbox_jitter((x_seat, 0.28, x_seat + 0.18, 0.36), rng=self.rng),
+                        is_clickable=True,
+                    )
+                )
+                el_id += 1
+                x_seat += 0.22
+
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="toggle_baggage_btn",
+                    text="Add Checked Baggage (+$40)" if "checked_bag" not in self.add_ons else "Checked Baggage Added [x]",
+                    bbox=apply_bbox_jitter((0.10, 0.40, 0.45, 0.48), rng=self.rng),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="proceed_to_review_btn",
+                    text="Proceed to Review >",
+                    bbox=apply_bbox_jitter((0.55, 0.40, 0.90, 0.48), rng=self.rng),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+
+        elif self.booking_stage == "review":
+            fl_num = self.selected_flight["number"] if self.selected_flight else self.target_flight_number
+            price = self.selected_flight["price"] if self.selected_flight else 299.0
+            if "checked_bag" in self.add_ons:
+                price += 40.0
+
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="h2",
+                    role="header",
+                    text="Review Booking Summary",
+                    bbox=(0.10, 0.05, 0.90, 0.12),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="div",
+                    role="summary_card",
+                    text=(
+                        f"Flight: {fl_num} | Route: {self.target_origin}->{self.target_destination} | "
+                        f"Passenger: {self.passenger_name_input or self.target_passenger_name} | "
+                        f"Seat: {self.selected_seat or '12A'} | Total: ${price:.2f}"
+                    ),
+                    bbox=apply_bbox_jitter((0.10, 0.16, 0.90, 0.35), rng=self.rng),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="confirm_booking_btn",
+                    text="Confirm and Complete Booking",
+                    bbox=apply_bbox_jitter((0.30, 0.42, 0.70, 0.52), rng=self.rng),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+
+        elif self.booking_stage == "complete":
+            ref = self.confirmed_booking.booking_id if self.confirmed_booking else "BK-9999"
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="h2",
+                    role="header",
+                    text="Booking Confirmed!",
+                    bbox=(0.10, 0.10, 0.90, 0.20),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="div",
+                    role="confirmation_banner",
+                    text=f"Reservation Ref: {ref} for {self.target_passenger_name}. Safe travels!",
+                    bbox=(0.10, 0.25, 0.90, 0.45),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+
+        # Add obstacle elements if active
+        if getattr(self, "obstacle_state", None) is not None and self.obstacle_state.active:
+            elements.extend(ObstacleInjector.get_obstacle_elements(self.obstacle_state, start_id=el_id))
+            el_id += 5
+
+        # Add distractor elements
+        distractors = generate_distractor_elements(start_id=el_id, num_distractors=2, rng=self.rng)
+        elements.extend(distractors)
+
+        return elements
+
+    def step(
+        self,
+        action_type: ActionType,
+        coordinates: Optional[Tuple[float, float]] = None,
+        argument: str = "",
+    ) -> StepResult:
+        if self.is_terminated or self.current_state is None:
+            return self._format_step_result(reward=0.0, done=True, truncated=False)
+
+        self.current_state.step_count += 1
+        reward = 0.0
+        done = False
+        action_success = False
+
+        hit_el = None
+        if coordinates is not None:
+            cx, cy = coordinates
+            for el in self.current_state.elements:
+                if el.is_clickable and el.contains(cx, cy):
+                    hit_el = el
+                    break
+
+        intercepted, dismissed, obs_reward = self.handle_obstacle_step(action_type, coordinates, hit_el)
+        if dismissed:
+            reward += obs_reward
+        if intercepted:
+            self.current_state.elements = self._build_page_elements()
+            self.current_state.cumulative_reward += reward
+            truncated = self.current_state.step_count >= self.active_scenario.max_steps
+            if truncated:
+                done = True
+            self.is_terminated = done
+            return self._format_step_result(reward=reward, done=done, truncated=truncated)
+
+        if action_type == ActionType.TYPE:
+            if hit_el and hit_el.is_input:
+                hit_el.value = argument
+                if hit_el.role == "origin_input":
+                    self.origin_input = argument.strip()
+                    action_success = True
+                elif hit_el.role == "dest_input":
+                    self.dest_input = argument.strip()
+                    action_success = True
+                elif hit_el.role == "date_input":
+                    self.date_input = argument.strip()
+                    action_success = True
+                elif hit_el.role == "passenger_name_input":
+                    self.passenger_name_input = argument.strip()
+                    action_success = True
+                elif hit_el.role == "passenger_email_input":
+                    self.passenger_email_input = argument.strip()
+                    action_success = True
+            else:
+                # Default input assignment based on stage
+                if self.booking_stage == "search":
+                    self.dest_input = argument.strip()
+                elif self.booking_stage == "details":
+                    self.passenger_name_input = argument.strip()
+                action_success = True
+
+        elif action_type == ActionType.CLICK:
+            if hit_el:
+                action_success = True
+                if hit_el.role == "search_flights_btn":
+                    self.booking_stage = "flights"
+                    if "search_submitted" not in self.milestones_achieved:
+                        reward += 0.5
+                        self.milestones_achieved.add("search_submitted")
+                elif hit_el.role.startswith("select_flight_"):
+                    fl_num = hit_el.role.replace("select_flight_", "")
+                    self.selected_flight = next((fl for fl in self.flights if fl["number"] == fl_num), self.flights[0])
+                    self.booking_stage = "details"
+                    if "flight_selected" not in self.milestones_achieved:
+                        reward += 0.5
+                        self.milestones_achieved.add("flight_selected")
+                elif hit_el.role.startswith("select_seat_"):
+                    self.selected_seat = hit_el.role.replace("select_seat_", "")
+                    if "seat_selected" not in self.milestones_achieved:
+                        reward += 0.2
+                        self.milestones_achieved.add("seat_selected")
+                elif hit_el.role == "toggle_baggage_btn":
+                    if "checked_bag" in self.add_ons:
+                        self.add_ons.remove("checked_bag")
+                    else:
+                        self.add_ons.append("checked_bag")
+                elif hit_el.role == "proceed_to_review_btn":
+                    self.booking_stage = "review"
+                    if "passenger_details_filled" not in self.milestones_achieved:
+                        reward += 0.5
+                        self.milestones_achieved.add("passenger_details_filled")
+                elif hit_el.role == "confirm_booking_btn":
+                    fl_num = self.selected_flight["number"] if self.selected_flight else self.target_flight_number
+                    price = self.selected_flight["price"] if self.selected_flight else 299.0
+                    if "checked_bag" in self.add_ons:
+                        price += 40.0
+                    self.confirmed_booking = FlightBookingRecord(
+                        booking_id=f"BK-{self.rng.randint(1000, 9999)}",
+                        origin=self.origin_input or self.target_origin,
+                        destination=self.dest_input or self.target_destination,
+                        departure_date=self.date_input or self.target_date,
+                        flight_number=fl_num,
+                        seat=self.selected_seat or "12A",
+                        passenger_name=self.passenger_name_input or self.target_passenger_name,
+                        passenger_email=self.passenger_email_input or self.target_passenger_email,
+                        add_ons=list(self.add_ons),
+                        total_price=price,
+                        confirmed=True,
+                    )
+                    self.booking_stage = "complete"
+                    self.goal_satisfied = True
+                    self.milestones_achieved.add("booking_confirmed")
+                    reward += 2.0
+                    done = True
+                elif hit_el.role == "back_to_search_btn":
+                    self.booking_stage = "search"
+
+        elif action_type == ActionType.FINISH:
+            if self.goal_satisfied:
+                reward += 2.0
+            done = True
+            action_success = True
+
+        self.current_state.elements = self._build_page_elements()
+        self.current_state.cumulative_reward += reward
+
+        truncated = self.current_state.step_count >= self.active_scenario.max_steps
+        if truncated:
+            done = True
+        self.is_terminated = done
+
+        return self._format_step_result(reward=reward, done=done, truncated=truncated)
+
+
+# ==============================================================================
+# 6. Dynamic CRM Pipeline Procedural Environment
+# ==============================================================================
+
+@dataclass
+class CRMDeal:
+    """Represents a prospective customer deal in the sales CRM pipeline."""
+
+    deal_id: str
+    company: str
+    value: float
+    stage: str  # "Lead", "Qualified", "Demo", "Proposal", "Closed-Won"
+    contact_name: str
+    notes: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "deal_id": self.deal_id,
+            "company": self.company,
+            "value": self.value,
+            "stage": self.stage,
+            "contact_name": self.contact_name,
+            "notes": self.notes,
+        }
+
+
+class DynamicCRMEnvironment(ProceduralEnvironment):
+    """
+    Enterprise CRM Sales Pipeline Sandbox.
+    Features:
+    - Interactive Kanban pipeline columns (Lead, Qualified, Demo, Proposal, Closed-Won).
+    - Deal modal creator and metadata editor.
+    - Stage advancement transitions with state-machine validation.
+    """
+
+    STAGES = ["Lead", "Qualified", "Demo", "Proposal", "Closed-Won"]
+    COMPANIES = ["Acme Corp", "Globex Inc", "Initech", "Stark Systems", "Umbrella Tech"]
+    REPS = ["Taylor Swift", "Bruce Wayne", "Clark Kent", "Diana Prince"]
+
+    def __init__(
+        self,
+        config: Optional[JEDM2Config] = None,
+        seed: Optional[int] = None,
+        device: Union[str, torch.device] = "cpu",
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__(config=config, scenario_id="crm_pipeline", device=device, dtype=dtype)
+        self.seed = seed if seed is not None else random.randint(1000, 999999)
+        self.rng = random.Random(self.seed)
+
+        self.target_company = self.rng.choice(self.COMPANIES)
+        self.target_value = float(self.rng.choice([25000, 50000, 75000, 100000]))
+
+        self.crm_view = "pipeline"  # pipeline, modal
+        self.modal_company = ""
+        self.modal_value = ""
+        self.active_deal_id: Optional[str] = None
+        self.milestones_achieved: Set[str] = set()
+
+        self.deals: Dict[str, CRMDeal] = self._generate_seed_deals()
+
+        self.active_scenario = ScenarioDefinition(
+            scenario_id=f"dynamic_crm_{self.seed}",
+            domain="crm_pipeline",
+            goal=(
+                f"Create a new deal for '{self.target_company}' with value ${int(self.target_value)}, "
+                f"and advance it to 'Closed-Won'"
+            ),
+            initial_url="https://crm.enterprise.internal/pipeline",
+            initial_title="Enterprise CRM - Sales Pipeline",
+            max_steps=12,
+        )
+        self.reset()
+
+    def _generate_seed_deals(self) -> Dict[str, CRMDeal]:
+        deals: Dict[str, CRMDeal] = {}
+        seed_companies = [c for c in self.COMPANIES if c != self.target_company][:3]
+        for idx, comp in enumerate(seed_companies):
+            d_id = f"deal-{idx + 1:03d}"
+            deals[d_id] = CRMDeal(
+                deal_id=d_id,
+                company=comp,
+                value=float(self.rng.randint(20, 90) * 1000),
+                stage=self.STAGES[idx % (len(self.STAGES) - 1)],
+                contact_name=self.rng.choice(self.REPS),
+            )
+        return deals
+
+    def reset(self) -> StepResult:
+        self.action_history.clear()
+        self.goal_satisfied = False
+        self.is_terminated = False
+        self.crm_view = "pipeline"
+        self.modal_company = ""
+        self.modal_value = ""
+        self.active_deal_id = None
+        self.milestones_achieved.clear()
+        self.deals = self._generate_seed_deals()
+
+        elements = self._build_page_elements()
+        self.current_state = EnvironmentState(
+            url=f"https://crm.enterprise.internal/{self.crm_view}",
+            title=f"Enterprise CRM - {self.crm_view.capitalize()}",
+            scroll_offset_y=0.0,
+            elements=elements,
+            step_count=0,
+            cumulative_reward=0.0,
+            last_action_str="INITIAL",
+            last_action_success=True,
+            metadata={"seed": self.seed, "view": self.crm_view},
+        )
+        return self._format_step_result(reward=0.0, done=False, truncated=False)
+
+    def _build_page_elements(self) -> List[UIElement]:
+        elements: List[UIElement] = []
+        el_id = 1
+
+        if self.crm_view == "pipeline":
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="h2",
+                    role="header",
+                    text="Sales Pipeline Kanban",
+                    bbox=(0.05, 0.04, 0.50, 0.10),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="new_deal_btn",
+                    text="+ New Deal",
+                    bbox=apply_bbox_jitter((0.78, 0.04, 0.95, 0.10), rng=self.rng),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+
+            # Render stage columns and deal cards
+            y_pos = 0.15
+            for stage in self.STAGES:
+                stage_deals = [d for d in self.deals.values() if d.stage == stage]
+                elements.append(
+                    UIElement(
+                        element_id=el_id,
+                        tag="div",
+                        role=f"stage_col_{stage.lower()}",
+                        text=f"Stage: {stage} ({len(stage_deals)})",
+                        bbox=(0.05, y_pos, 0.35, y_pos + 0.06),
+                        is_clickable=False,
+                    )
+                )
+                el_id += 1
+
+                for deal in stage_deals:
+                    elements.append(
+                        UIElement(
+                            element_id=el_id,
+                            tag="div",
+                            role=f"deal_card_{deal.deal_id}",
+                            text=f"{deal.company} - ${deal.value:,.0f} [{deal.stage}]",
+                            bbox=apply_bbox_jitter((0.38, y_pos, 0.72, y_pos + 0.06), rng=self.rng),
+                            is_clickable=False,
+                        )
+                    )
+                    el_id += 1
+                    if stage != "Closed-Won":
+                        elements.append(
+                            UIElement(
+                                element_id=el_id,
+                                tag="button",
+                                role=f"advance_deal_{deal.deal_id}",
+                                text=f"Advance '{deal.company}' >",
+                                bbox=apply_bbox_jitter((0.75, y_pos, 0.95, y_pos + 0.06), rng=self.rng),
+                                is_clickable=True,
+                            )
+                        )
+                        el_id += 1
+                    y_pos += 0.08
+
+        elif self.crm_view == "modal":
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="h2",
+                    role="header",
+                    text="Create / Edit Deal",
+                    bbox=(0.20, 0.15, 0.80, 0.22),
+                    is_clickable=False,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="input",
+                    role="deal_company_input",
+                    text=self.modal_company or "Enter company name",
+                    bbox=apply_bbox_jitter((0.20, 0.26, 0.80, 0.34), rng=self.rng),
+                    value=self.modal_company,
+                    is_clickable=True,
+                    is_input=True,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="input",
+                    role="deal_value_input",
+                    text=self.modal_value or "Enter estimated value ($)",
+                    bbox=apply_bbox_jitter((0.20, 0.38, 0.80, 0.46), rng=self.rng),
+                    value=self.modal_value,
+                    is_clickable=True,
+                    is_input=True,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="save_deal_btn",
+                    text="Save Deal",
+                    bbox=apply_bbox_jitter((0.20, 0.52, 0.48, 0.60), rng=self.rng),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+            elements.append(
+                UIElement(
+                    element_id=el_id,
+                    tag="button",
+                    role="close_modal_btn",
+                    text="Cancel",
+                    bbox=apply_bbox_jitter((0.52, 0.52, 0.80, 0.60), rng=self.rng),
+                    is_clickable=True,
+                )
+            )
+            el_id += 1
+
+        # Add obstacle elements if active
+        if getattr(self, "obstacle_state", None) is not None and self.obstacle_state.active:
+            elements.extend(ObstacleInjector.get_obstacle_elements(self.obstacle_state, start_id=el_id))
+            el_id += 5
+
+        # Add distractor elements
+        distractors = generate_distractor_elements(start_id=el_id, num_distractors=2, rng=self.rng)
+        elements.extend(distractors)
+
+        return elements
+
+    def step(
+        self,
+        action_type: ActionType,
+        coordinates: Optional[Tuple[float, float]] = None,
+        argument: str = "",
+    ) -> StepResult:
+        if self.is_terminated or self.current_state is None:
+            return self._format_step_result(reward=0.0, done=True, truncated=False)
+
+        self.current_state.step_count += 1
+        reward = 0.0
+        done = False
+        action_success = False
+
+        hit_el = None
+        if coordinates is not None:
+            cx, cy = coordinates
+            for el in self.current_state.elements:
+                if el.is_clickable and el.contains(cx, cy):
+                    hit_el = el
+                    break
+
+        intercepted, dismissed, obs_reward = self.handle_obstacle_step(action_type, coordinates, hit_el)
+        if dismissed:
+            reward += obs_reward
+        if intercepted:
+            self.current_state.elements = self._build_page_elements()
+            self.current_state.cumulative_reward += reward
+            truncated = self.current_state.step_count >= self.active_scenario.max_steps
+            if truncated:
+                done = True
+            self.is_terminated = done
+            return self._format_step_result(reward=reward, done=done, truncated=truncated)
+
+        if action_type == ActionType.TYPE:
+            if hit_el and hit_el.is_input:
+                hit_el.value = argument
+                if hit_el.role == "deal_company_input":
+                    self.modal_company = argument.strip()
+                    action_success = True
+                elif hit_el.role == "deal_value_input":
+                    self.modal_value = argument.strip()
+                    action_success = True
+            else:
+                if self.crm_view == "modal":
+                    self.modal_company = argument.strip()
+                    action_success = True
+
+        elif action_type == ActionType.CLICK:
+            if hit_el:
+                action_success = True
+                if hit_el.role == "new_deal_btn":
+                    self.crm_view = "modal"
+                    if "deal_modal_opened" not in self.milestones_achieved:
+                        reward += 0.3
+                        self.milestones_achieved.add("deal_modal_opened")
+                elif hit_el.role == "close_modal_btn":
+                    self.crm_view = "pipeline"
+                elif hit_el.role == "save_deal_btn":
+                    company = self.modal_company or self.target_company
+                    try:
+                        clean_num = re.sub(r"[^\d.]", "", self.modal_value)
+                        val = float(clean_num) if clean_num else self.target_value
+                    except (ValueError, TypeError):
+                        val = self.target_value
+
+                    deal_id = f"deal-{len(self.deals) + 1:03d}"
+                    new_deal = CRMDeal(
+                        deal_id=deal_id,
+                        company=company,
+                        value=val,
+                        stage="Lead",
+                        contact_name="Lead Manager",
+                    )
+                    self.deals[deal_id] = new_deal
+                    self.crm_view = "pipeline"
+                    if "deal_created" not in self.milestones_achieved:
+                        reward += 0.5
+                        self.milestones_achieved.add("deal_created")
+                elif hit_el.role.startswith("advance_deal_"):
+                    d_id = hit_el.role.replace("advance_deal_", "")
+                    deal = self.deals.get(d_id)
+                    if deal and deal.stage in self.STAGES:
+                        curr_idx = self.STAGES.index(deal.stage)
+                        if curr_idx < len(self.STAGES) - 1:
+                            deal.stage = self.STAGES[curr_idx + 1]
+                            reward += 0.2
+                            self.milestones_achieved.add("stage_advanced")
+                            if deal.stage == "Closed-Won":
+                                self.milestones_achieved.add("deal_closed_won")
+                                if deal.company.lower() == self.target_company.lower():
+                                    self.goal_satisfied = True
+                                    reward += 2.0
+                                    done = True
+
+        elif action_type == ActionType.FINISH:
+            if self.goal_satisfied:
+                reward += 2.0
+            done = True
+            action_success = True
+
+        self.current_state.elements = self._build_page_elements()
+        self.current_state.cumulative_reward += reward
+
+        truncated = self.current_state.step_count >= self.active_scenario.max_steps
+        if truncated:
+            done = True
+        self.is_terminated = done
+
+        return self._format_step_result(reward=reward, done=done, truncated=truncated)
+
+
+# ==============================================================================
+# 7. Programmatic Outcome Verifiers & Milestone Detectors
+# ==============================================================================
+
+@dataclass
+class OutcomeVerificationResult:
+    """Deterministic programmatic outcome verification container (zero human annotation)."""
+
+    goal_satisfied: bool
+    milestones_achieved: List[str]
+    detected_errors: List[str]
+    trajectory_efficiency: float
+    state_payload: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "goal_satisfied": self.goal_satisfied,
+            "milestones_achieved": self.milestones_achieved,
+            "detected_errors": self.detected_errors,
+            "trajectory_efficiency": self.trajectory_efficiency,
+            "state_payload": self.state_payload,
+        }
+
+
+def verify_ecommerce_outcome(env: DynamicEcommerceEnvironment) -> OutcomeVerificationResult:
+    milestones = list(env.milestones_achieved)
+    errors: List[str] = []
+    satisfied = False
+
+    if env.stage == "complete" and env.goal_satisfied:
+        if any(it.item_id == env.target_item.item_id for it in env.cart):
+            satisfied = True
+            if "order_placed" not in milestones:
+                milestones.append("order_placed")
+        else:
+            errors.append("target_item_not_in_cart")
+
+    return OutcomeVerificationResult(
+        goal_satisfied=satisfied,
+        milestones_achieved=milestones,
+        detected_errors=errors,
+        trajectory_efficiency=len(milestones) / max(1, env.current_state.step_count if env.current_state else 1),
+        state_payload={"cart_size": len(env.cart), "stage": env.stage},
+    )
+
+
+def verify_form_outcome(env: DynamicFormPortalEnvironment) -> OutcomeVerificationResult:
+    milestones = list(env.milestones_achieved)
+    errors: List[str] = []
+    satisfied = False
+
+    total_steps = len(getattr(env, "STEPS", ["Identity", "Company", "Preferences", "Review"]))
+    step_idx = getattr(env, "current_step_idx", 0)
+    if env.goal_satisfied:
+        satisfied = True
+        if "form_completed" not in milestones:
+            milestones.append("form_completed")
+    elif step_idx >= total_steps - 1 and env.form_data.get("name") and env.form_data.get("email"):
+        satisfied = True
+        if "form_completed" not in milestones:
+            milestones.append("form_completed")
+
+    return OutcomeVerificationResult(
+        goal_satisfied=satisfied,
+        milestones_achieved=milestones,
+        detected_errors=errors,
+        trajectory_efficiency=len(milestones) / max(1, env.current_state.step_count if env.current_state else 1),
+        state_payload={"current_step_idx": step_idx, "form_data": env.form_data},
+    )
+
+
+def verify_booking_outcome(env: DynamicBookingEnvironment) -> OutcomeVerificationResult:
+    milestones = list(env.milestones_achieved)
+    errors: List[str] = []
+    satisfied = False
+
+    if env.confirmed_booking is not None and env.confirmed_booking.confirmed:
+        b = env.confirmed_booking
+        matches_origin = (b.origin.lower() == env.target_origin.lower())
+        matches_dest = (b.destination.lower() == env.target_destination.lower())
+        matches_name = (b.passenger_name.lower() == env.target_passenger_name.lower())
+
+        if matches_origin and matches_dest and matches_name:
+            satisfied = True
+            if "booking_confirmed" not in milestones:
+                milestones.append("booking_confirmed")
+        else:
+            errors.append("booking_attribute_mismatch")
+
+    return OutcomeVerificationResult(
+        goal_satisfied=satisfied,
+        milestones_achieved=milestones,
+        detected_errors=errors,
+        trajectory_efficiency=len(milestones) / max(1, env.current_state.step_count if env.current_state else 1),
+        state_payload={"booking": env.confirmed_booking.to_dict() if env.confirmed_booking else None},
+    )
+
+
+def verify_crm_outcome(env: DynamicCRMEnvironment) -> OutcomeVerificationResult:
+    milestones = list(env.milestones_achieved)
+    errors: List[str] = []
+    satisfied = False
+
+    target_deal = next((d for d in env.deals.values() if d.company.lower() == env.target_company.lower()), None)
+    if target_deal is not None:
+        if target_deal.stage == "Closed-Won":
+            satisfied = True
+            if "deal_closed_won" not in milestones:
+                milestones.append("deal_closed_won")
+        else:
+            errors.append(f"deal_not_closed_won (stage={target_deal.stage})")
+    else:
+        errors.append("target_deal_not_found")
+
+    return OutcomeVerificationResult(
+        goal_satisfied=satisfied,
+        milestones_achieved=milestones,
+        detected_errors=errors,
+        trajectory_efficiency=len(milestones) / max(1, env.current_state.step_count if env.current_state else 1),
+        state_payload={"deals_count": len(env.deals), "target_deal": target_deal.to_dict() if target_deal else None},
+    )
+
+
+def verify_cloud_outcome(env: DynamicCloudAdminEnvironment) -> OutcomeVerificationResult:
+    milestones = list(env.milestones_achieved)
+    errors: List[str] = []
+    satisfied = False
+
+    target_inst = next((i for i in env.instances if i["id"] == env.target_instance_id), None)
+    if target_inst and target_inst.get("state") == "Stopped" and env.goal_satisfied:
+        satisfied = True
+        if "instance_stopped" not in milestones:
+            milestones.append("instance_stopped")
+
+    return OutcomeVerificationResult(
+        goal_satisfied=satisfied,
+        milestones_achieved=milestones,
+        detected_errors=errors,
+        trajectory_efficiency=len(milestones) / max(1, env.current_state.step_count if env.current_state else 1),
+        state_payload={"target_instance": target_inst},
+    )
+
+
+def verify_environment_outcome(env: Any) -> OutcomeVerificationResult:
+    """Unified outcome verification router across all Web/OS environments."""
+    if isinstance(env, DynamicEcommerceEnvironment):
+        return verify_ecommerce_outcome(env)
+    elif isinstance(env, DynamicFormPortalEnvironment):
+        return verify_form_outcome(env)
+    elif isinstance(env, DynamicBookingEnvironment):
+        return verify_booking_outcome(env)
+    elif isinstance(env, DynamicCRMEnvironment):
+        return verify_crm_outcome(env)
+    elif isinstance(env, DynamicCloudAdminEnvironment):
+        return verify_cloud_outcome(env)
+    else:
+        satisfied = bool(getattr(env, "goal_satisfied", False))
+        milestones = list(getattr(env, "milestones_achieved", set()))
+        return OutcomeVerificationResult(
+            goal_satisfied=satisfied,
+            milestones_achieved=milestones,
+            detected_errors=[],
+            trajectory_efficiency=len(milestones) / max(1, getattr(env.current_state, "step_count", 1) if getattr(env, "current_state", None) else 1),
+            state_payload={},
+        )
+
+
+@dataclass
+class MilestoneEvent:
+    name: str
+    step: int
+    reward: float = 0.15
+
+
+def detect_milestones(env: Any) -> List[MilestoneEvent]:
+    """Extracts verified milestone progression events from an environment instance."""
+    milestones = getattr(env, "milestones_achieved", set())
+    step = getattr(env.current_state, "step_count", 0) if getattr(env, "current_state", None) else 0
+    return [MilestoneEvent(name=m, step=step, reward=0.15) for m in milestones]
+
+
+# ==============================================================================
+# 8. Dynamic Scenario Generator Factory
 # ==============================================================================
 
 class DynamicScenarioGenerator:
     """
     Factory synthesizing an unbounded variety of interactive Web/OS environments.
-    Covers:
+    Covers 5+ domains:
     - DynamicEcommerce
     - DynamicFormPortal
+    - DynamicBooking
+    - DynamicCRM
     - DynamicCloudAdmin
     - DynamicWebBrowser
     """
 
-    AVAILABLE_DOMAINS = ["ecommerce", "form_portal", "cloud_admin", "web_browser"]
+    AVAILABLE_DOMAINS = [
+        "ecommerce",
+        "form_portal",
+        "booking",
+        "crm",
+        "cloud_admin",
+        "web_browser",
+    ]
 
     def __init__(
         self,
@@ -1355,6 +2810,14 @@ class DynamicScenarioGenerator:
         self.device = torch.device(device)
         self.dtype = dtype
 
+    def create_environment(
+        self,
+        domain: Optional[str] = None,
+        seed: Optional[int] = None,
+    ) -> WebOSEnvironment:
+        """Alias for generate() synthesizing an active environment sandbox."""
+        return self.generate(domain=domain, seed=seed)
+
     def generate(
         self,
         domain: Optional[str] = None,
@@ -1364,7 +2827,7 @@ class DynamicScenarioGenerator:
         Synthesizes a randomized procedural environment.
 
         Args:
-            domain: Optional domain choice ('ecommerce', 'form_portal', 'cloud_admin', 'web_browser').
+            domain: Optional domain choice ('ecommerce', 'form_portal', 'booking', 'crm', 'cloud_admin', 'web_browser').
                     If omitted, randomly samples across available domains.
             seed: Optional integer seed for deterministic environment generation.
 
@@ -1383,6 +2846,20 @@ class DynamicScenarioGenerator:
             )
         elif dom == "form_portal":
             return DynamicFormPortalEnvironment(
+                config=self.config,
+                seed=effective_seed,
+                device=self.device,
+                dtype=self.dtype,
+            )
+        elif dom == "booking":
+            return DynamicBookingEnvironment(
+                config=self.config,
+                seed=effective_seed,
+                device=self.device,
+                dtype=self.dtype,
+            )
+        elif dom == "crm":
+            return DynamicCRMEnvironment(
                 config=self.config,
                 seed=effective_seed,
                 device=self.device,

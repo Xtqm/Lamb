@@ -108,13 +108,32 @@ def parse_args() -> argparse.Namespace:
         "--success_threshold",
         type=float,
         default=0.80,
-        help="Moving success rate threshold required to advance curriculum tiers (e.g. 0.60 for 60%%)",
+        help="Moving success rate threshold required to advance curriculum tiers (e.g. 0.80 for 80%%)",
     )
     parser.add_argument(
         "--window_size",
         type=int,
-        default=10,
+        default=50,
         help="Rolling window size of episodes for curriculum success tracking",
+    )
+    parser.add_argument(
+        "--reward_mode",
+        type=str,
+        default="outcome",
+        choices=["outcome", "shaped"],
+        help="Reward calculation formulation: 'outcome' (outcome-supervised programmatic verifier) or 'shaped' (dense heuristic shaping)",
+    )
+    parser.add_argument(
+        "--outcome_supervised",
+        action="store_true",
+        default=True,
+        help="Enable deterministic outcome-supervised verification and milestone scoring",
+    )
+    parser.add_argument(
+        "--obstacle_prob",
+        type=float,
+        default=0.25,
+        help="Probability of injecting procedural obstacles (cookie modals, delays, validation errors) into synthetic gym environments",
     )
 
     # DPO Hyperparameters
@@ -385,18 +404,26 @@ def main() -> None:
                 seed=args.seed + iteration * 100 if scenario_gen is not None else None,
                 env_type=args.env_type,
                 browser_env=browser_env,
+                outcome_supervised=args.outcome_supervised,
+                obstacle_prob=args.obstacle_prob,
             )
 
-            # Record outcomes for curriculum advancement (goal success or positive milestone)
+            # Record outcomes for curriculum advancement (goal success)
+            group_successes = [bool(t.success) for t in group]
+            group_sr = sum(group_successes) / max(1, len(group_successes))
+            has_obstacle = [any("[OBSTACLE:" in turn.obs_text for turn in t.turns) for t in group]
+            recovered = [t.success for i, t in enumerate(group) if has_obstacle[i]]
+            rec_rate = (sum(recovered) / len(recovered)) if recovered else 1.0
+
             if curriculum is not None:
-                advanced = curriculum.record_outcomes([t.success or t.cumulative_reward > 0.0 for t in group])
+                advanced = curriculum.record_outcomes(group_successes)
                 if advanced:
                     print(f"  >>> [Curriculum] ADVANCED TO {curriculum.level_name.upper()}! <<<")
 
-            # 2. Collate rollouts into batched training tensors with shaped rewards
+            # 2. Collate rollouts into batched training tensors with shaped/outcome rewards
             batch = sampler.collate_rollouts(
                 group,
-                reward_mode="shaped",
+                reward_mode=args.reward_mode,
                 cpu_offload=args.env_type == "real_web",
             )
             grouped_rewards = batch["rewards"].view(-1, args.group_size)
@@ -475,6 +502,7 @@ def main() -> None:
                     if curriculum is not None
                     else ""
                 )
+                sr_info = f" | SR:{group_sr * 100:4.0f}% | Rec:{rec_rate * 100:4.0f}%" if args.reward_mode == "outcome" else ""
                 print(
                     f"[{iteration:03d}/{args.iterations:03d}]  "
                     f"Loss: {metrics['loss_grpo']:7.4f} | "
@@ -487,6 +515,7 @@ def main() -> None:
                     f"Grad: {grad_norm:5.2f} | "
                     f"{throughput:5.1f} t/s | "
                     f"{peak_vram_mb:6.1f} MB"
+                    f"{sr_info}"
                     f"{curr_info}"
                 )
 

@@ -12,7 +12,7 @@ Target scale: ~45M total parameters / ~14M active parameters per token.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

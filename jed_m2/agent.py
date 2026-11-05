@@ -159,6 +159,17 @@ class JEDM2Agent:
         self.snap_coordinates_to_candidates = snap_coordinates_to_candidates
         self.max_snap_distance = max_snap_distance
 
+        # Best-of-N JEPA Test-Time Search Harness
+        self.search_harness = None
+        if getattr(model, "jepa", None) is not None:
+            from jed_m2.jepa import JEPASearchHarness
+            self.search_harness = JEPASearchHarness(
+                jepa_model=model.jepa,
+                plan_lambda=jepa_planning_lambda,
+                device=self.device,
+                dtype=self.dtype,
+            )
+
         # Ensure model is in evaluation mode for live rollout
         self.model.eval()
 
@@ -457,100 +468,70 @@ class JEDM2Agent:
         if not cand_pairs:
             return top_act_id, raw_coords, {"status": "no_candidates", "current_goal_dist": curr_goal_dist}
 
-        # Vectorized 1-step lookahead rollout in JEPA latent space
-        M = len(cand_pairs)
-        z_batch = z_t.expand(M, -1)
-        act_tensor = torch.tensor([p[0] for p in cand_pairs], device=self.device, dtype=torch.long)
-        coords_tensor = torch.tensor([p[1] for p in cand_pairs], device=self.device, dtype=self.dtype)
-
-        with torch.no_grad():
-            z_pred_batch = self.model.jepa.predict(z_batch, act_tensor, coords=coords_tensor)
-
-        # Compute goal cosine distances for all candidates
-        sims = F.cosine_similarity(z_pred_batch, z_goal.expand(M, -1), dim=-1).clamp(-1.0, 1.0)
-        goal_dists = (1.0 - sims).tolist()
-
-        # Check loop distance against historical latent states
-        hist_tensors = [h for h in self.latent_history[-8:] if h is not None]
-        if hist_tensors:
-            hist_stack = torch.cat([h if h.ndim == 2 else h.unsqueeze(0) for h in hist_tensors], dim=0)
-            hist_stack = hist_stack.to(device=self.device, dtype=self.dtype)
-            hist_sims = F.cosine_similarity(
-                z_pred_batch.unsqueeze(1), hist_stack.unsqueeze(0), dim=-1
-            ).clamp(-1.0, 1.0)
-            min_loop_dists = (1.0 - hist_sims.max(dim=-1).values).tolist()
+        # Operationalize Best-of-N JEPA Test-Time Search Harness
+        from jed_m2.jepa import CandidateAction, JEPASearchHarness
+        harness = self.search_harness
+        if harness is None:
+            harness = JEPASearchHarness(
+                jepa_model=self.model.jepa,
+                drift_threshold=drift_threshold,
+                loop_threshold=loop_threshold,
+                plan_lambda=plan_lambda,
+                spatial_beta=spatial_beta,
+                device=self.device,
+                dtype=self.dtype,
+            )
         else:
-            min_loop_dists = [1.0] * M
+            harness.drift_threshold = drift_threshold
+            harness.loop_threshold = loop_threshold
+            harness.plan_lambda = plan_lambda
+            harness.spatial_beta = spatial_beta
 
-        # Evaluate pruning and score candidates
-        details: List[Dict[str, Any]] = []
-        valid_candidates: List[Tuple[float, int, Tuple[float, float]]] = []
-        all_candidates_scored: List[Tuple[float, int, Tuple[float, float]]] = []
+        candidate_objs = [
+            CandidateAction(
+                action_type_id=p[0],
+                coordinates=p[1],
+                raw_score=float(logits_1d[p[0]].item()),
+            )
+            for p in cand_pairs
+        ]
 
-        for m in range(M):
-            act_id, (cx, cy) = cand_pairs[m]
-            act_name = ActionType(act_id).name if 0 <= act_id < len(ActionType) else str(act_id)
-            g_dist = float(goal_dists[m])
-            loop_dist = float(min_loop_dists[m])
-            drift = g_dist - curr_goal_dist
+        search_res = harness.search(
+            z_t=z_t,
+            z_goal=z_goal,
+            candidates=candidate_objs,
+            latent_history=self.latent_history,
+            pointer_prior=raw_coords,
+        )
 
-            if act_id in (ActionType.FINISH.value, ActionType.NAVIGATE.value):
-                spatial_dist = 0.0
-            else:
-                spatial_dist = float(math.sqrt((cx - rx) ** 2 + (cy - ry) ** 2))
-
-            logit_val = float(logits_1d[act_id].item())
-            score = logit_val - spatial_beta * spatial_dist - plan_lambda * g_dist
-
-            pruned = False
-            prune_reason = ""
-            if drift > drift_threshold:
-                pruned = True
-                prune_reason = f"drift ({drift:.3f} > {drift_threshold:.3f})"
-            elif loop_dist < loop_threshold:
-                pruned = True
-                prune_reason = f"loop ({loop_dist:.3f} < {loop_threshold:.3f})"
-
-            detail = {
-                "action": act_name,
-                "action_id": act_id,
-                "coords": (cx, cy),
-                "goal_dist": g_dist,
-                "loop_dist": loop_dist,
-                "drift": drift,
-                "score": score,
-                "pruned": pruned,
-                "prune_reason": prune_reason,
+        details = [
+            {
+                "action": ActionType(c.action_type_id).name if 0 <= c.action_type_id < len(ActionType) else str(c.action_type_id),
+                "action_id": c.action_type_id,
+                "coords": c.coordinates,
+                "goal_dist": c.goal_dist,
+                "loop_dist": c.loop_dist,
+                "drift": c.drift,
+                "score": c.fused_score,
+                "pruned": c.pruned,
+                "prune_reason": c.prune_reason,
             }
-            details.append(detail)
-            all_candidates_scored.append((score, act_id, (cx, cy)))
-
-            if not pruned:
-                valid_candidates.append((score, act_id, (cx, cy)))
-
-        # Selection with fallback
-        if valid_candidates:
-            valid_candidates.sort(key=lambda x: x[0], reverse=True)
-            best_score, sel_act_id, sel_coords = valid_candidates[0]
-            fallback_used = False
-        else:
-            # Safe fallback: select candidate with highest score
-            all_candidates_scored.sort(key=lambda x: x[0], reverse=True)
-            best_score, sel_act_id, sel_coords = all_candidates_scored[0]
-            fallback_used = True
+            for c in search_res.candidates
+        ]
 
         metadata = {
             "current_goal_dist": curr_goal_dist,
-            "total_candidates": M,
-            "valid_candidates": len(valid_candidates),
-            "fallback_used": fallback_used,
-            "selected_action": ActionType(sel_act_id).name,
-            "selected_coords": sel_coords,
-            "selected_score": best_score,
+            "total_candidates": search_res.num_candidates_evaluated,
+            "valid_candidates": search_res.num_candidates_evaluated - search_res.num_candidates_pruned,
+            "fallback_used": search_res.fallback_used,
+            "selected_action": ActionType(search_res.selected_action_id).name,
+            "selected_coords": search_res.selected_coordinates,
+            "selected_score": search_res.selected_score,
+            "latency_ms": search_res.latency_ms,
             "candidates": details,
         }
 
-        return sel_act_id, sel_coords, metadata
+        return search_res.selected_action_id, search_res.selected_coordinates, metadata
 
     def act(
         self,
@@ -710,6 +691,8 @@ class JEDM2Agent:
             }
             jepa_planning_scores["selected_score"] = float(planning_meta.get("selected_score", 0.0))
             jepa_planning_scores["fallback_used"] = 1.0 if planning_meta.get("fallback_used", False) else 0.0
+            jepa_planning_scores["total_candidates"] = float(planning_meta.get("total_candidates", len(planning_meta.get("candidates", []))))
+            jepa_planning_scores["latency_ms"] = float(planning_meta.get("latency_ms", 0.0))
 
             # Record current latent state in history for future loop elimination
             self.latent_history.append(z_t.detach())

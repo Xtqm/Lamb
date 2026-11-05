@@ -7,7 +7,10 @@ STRICT BUILD RULE: Pure PyTorch without external compiled C++/CUDA packages.
 """
 
 import copy
-from typing import Dict, Optional, Tuple, Union
+from dataclasses import dataclass, field
+import math
+import time
+from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -348,3 +351,212 @@ class JEPAWorldModel(nn.Module):
     def update_target_network(self) -> None:
         """Applies momentum update to target encoder parameters."""
         self.target_encoder.update(self.encoder, self.ema_decay)
+
+
+# ==============================================================================
+# 5. Best-of-N JEPA Test-Time Search Engine
+# ==============================================================================
+
+@dataclass
+class CandidateAction:
+    """Hypothesis container representing a candidate action-coordinate pair."""
+
+    action_type_id: int
+    coordinates: Tuple[float, float]
+    raw_score: float = 0.0
+    argument: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SearchCandidateResult:
+    """Detailed evaluation metrics for a single prospective candidate rollout."""
+
+    action_type_id: int
+    coordinates: Tuple[float, float]
+    argument: str
+    goal_dist: float
+    loop_dist: float
+    drift: float
+    fused_score: float
+    pruned: bool
+    prune_reason: str = ""
+
+
+@dataclass
+class JEPASearchResult:
+    """Structured decision output from test-time JEPA latent candidate rollout."""
+
+    selected_action_id: int
+    selected_coordinates: Tuple[float, float]
+    selected_argument: str
+    selected_score: float
+    fallback_used: bool
+    num_candidates_evaluated: int
+    num_candidates_pruned: int
+    latency_ms: float
+    candidates: List[SearchCandidateResult] = field(default_factory=list)
+
+
+class JEPASearchHarness:
+    """
+    Test-Time Model-Predictive Control (MPC) Search Harness powered by JEPA.
+    Executes vectorized Best-of-N candidate action rollout in latent space:
+    1. Batched transition prediction: z_hat_{t+1}^(k) = Predictor(z_t, a_k, x_k, y_k)
+    2. Goal drift pruning: d(z_hat, z_goal) > d(z_t, z_goal) + delta_drift
+    3. Historical loop elimination: max_tau sim(z_hat, z_{t-tau}) > 1 - eps_loop
+    4. Fused value re-ranking with safe top-policy fallback
+    Executes within < 10 ms on consumer GPU.
+    """
+
+    def __init__(
+        self,
+        jepa_model: JEPAWorldModel,
+        drift_threshold: float = 0.15,
+        loop_threshold: float = 0.05,
+        plan_lambda: float = 1.0,
+        spatial_beta: float = 2.0,
+        device: Optional[Union[str, torch.device]] = None,
+        dtype: torch.dtype = torch.float32,
+    ):
+        self.jepa = jepa_model
+        self.drift_threshold = drift_threshold
+        self.loop_threshold = loop_threshold
+        self.plan_lambda = plan_lambda
+        self.spatial_beta = spatial_beta
+        if device is not None:
+            self.device = torch.device(device)
+        else:
+            try:
+                self.device = next(jepa_model.parameters()).device
+            except StopIteration:
+                self.device = torch.device("cpu")
+        self.dtype = dtype
+
+    def search(
+        self,
+        z_t: torch.Tensor,
+        z_goal: torch.Tensor,
+        candidates: List[CandidateAction],
+        latent_history: Optional[List[torch.Tensor]] = None,
+        pointer_prior: Optional[Tuple[float, float]] = None,
+    ) -> JEPASearchResult:
+        """
+        Evaluates candidate action hypotheses in a single batched JEPA latent rollout pass.
+
+        Args:
+            z_t: Current latent state tensor [1, D_latent] or [D_latent].
+            z_goal: Target goal latent state tensor [1, D_latent] or [D_latent].
+            candidates: List of CandidateAction instances (N <= 16).
+            latent_history: Optional list of past visited latent tensors [z_{t-H}, ..., z_{t-1}].
+            pointer_prior: Optional predicted pointer coordinates (x_pred, y_pred).
+
+        Returns:
+            JEPASearchResult containing the chosen action, scores, and pruning telemetry.
+        """
+        start_time = time.perf_counter()
+
+        if not candidates:
+            raise ValueError("Candidates list must contain at least one CandidateAction.")
+
+        if z_t.ndim == 1:
+            z_t = z_t.unsqueeze(0)
+        z_t = z_t.to(device=self.device, dtype=self.dtype)
+
+        if z_goal.ndim == 1:
+            z_goal = z_goal.unsqueeze(0)
+        z_goal = z_goal.to(device=self.device, dtype=self.dtype)
+
+        curr_goal_dist = float(1.0 - F.cosine_similarity(z_t, z_goal, dim=-1).clamp(-1.0, 1.0).item())
+
+        M = len(candidates)
+        z_batch = z_t.expand(M, -1)
+        act_tensor = torch.tensor([c.action_type_id for c in candidates], device=self.device, dtype=torch.long)
+        coords_tensor = torch.tensor([c.coordinates for c in candidates], device=self.device, dtype=self.dtype)
+
+        # 1. Vectorized 1-step lookahead rollout in JEPA latent space
+        with torch.no_grad():
+            z_pred_batch = self.jepa.predict(z_batch, act_tensor, coords=coords_tensor)
+
+        # 2. Compute goal cosine distances for all candidates in parallel
+        sims = F.cosine_similarity(z_pred_batch, z_goal.expand(M, -1), dim=-1).clamp(-1.0, 1.0)
+        goal_dists = (1.0 - sims).tolist()
+
+        # 3. Compute loop distance against historical latent states
+        hist_tensors = [h for h in (latent_history or [])[-8:] if h is not None]
+        if hist_tensors:
+            hist_stack = torch.cat([h if h.ndim == 2 else h.unsqueeze(0) for h in hist_tensors], dim=0)
+            hist_stack = hist_stack.to(device=self.device, dtype=self.dtype)
+            hist_sims = F.cosine_similarity(
+                z_pred_batch.unsqueeze(1), hist_stack.unsqueeze(0), dim=-1
+            ).clamp(-1.0, 1.0)
+            min_loop_dists = (1.0 - hist_sims.max(dim=-1).values).tolist()
+        else:
+            min_loop_dists = [1.0] * M
+
+        # 4. Pruning and score evaluation
+        evaluated_candidates: List[SearchCandidateResult] = []
+        valid_candidates: List[Tuple[float, int, Tuple[float, float], str]] = []
+        all_candidates_scored: List[Tuple[float, int, Tuple[float, float], str]] = []
+
+        rx, ry = pointer_prior if pointer_prior is not None else (0.5, 0.5)
+
+        for m in range(M):
+            cand = candidates[m]
+            cx, cy = cand.coordinates
+            g_dist = float(goal_dists[m])
+            loop_dist = float(min_loop_dists[m])
+            drift = g_dist - curr_goal_dist
+
+            spatial_dist = math.hypot(cx - rx, cy - ry)
+            fused_score = cand.raw_score - self.spatial_beta * spatial_dist - self.plan_lambda * g_dist
+
+            pruned = False
+            prune_reason = ""
+            if drift > self.drift_threshold:
+                pruned = True
+                prune_reason = f"drift ({drift:.3f} > {self.drift_threshold:.3f})"
+            elif loop_dist < self.loop_threshold:
+                pruned = True
+                prune_reason = f"loop ({loop_dist:.3f} < {self.loop_threshold:.3f})"
+
+            eval_res = SearchCandidateResult(
+                action_type_id=cand.action_type_id,
+                coordinates=cand.coordinates,
+                argument=cand.argument,
+                goal_dist=g_dist,
+                loop_dist=loop_dist,
+                drift=drift,
+                fused_score=fused_score,
+                pruned=pruned,
+                prune_reason=prune_reason,
+            )
+            evaluated_candidates.append(eval_res)
+            all_candidates_scored.append((fused_score, cand.action_type_id, cand.coordinates, cand.argument))
+
+            if not pruned:
+                valid_candidates.append((fused_score, cand.action_type_id, cand.coordinates, cand.argument))
+
+        # 5. Selection with safe fallback guarantee
+        if valid_candidates:
+            valid_candidates.sort(key=lambda x: x[0], reverse=True)
+            sel_score, sel_act_id, sel_coords, sel_arg = valid_candidates[0]
+            fallback_used = False
+        else:
+            all_candidates_scored.sort(key=lambda x: x[0], reverse=True)
+            sel_score, sel_act_id, sel_coords, sel_arg = all_candidates_scored[0]
+            fallback_used = True
+
+        latency_ms = (time.perf_counter() - start_time) * 1000.0
+
+        return JEPASearchResult(
+            selected_action_id=sel_act_id,
+            selected_coordinates=sel_coords,
+            selected_argument=sel_arg,
+            selected_score=float(sel_score),
+            fallback_used=fallback_used,
+            num_candidates_evaluated=M,
+            num_candidates_pruned=M - len(valid_candidates),
+            latency_ms=latency_ms,
+            candidates=evaluated_candidates,
+        )

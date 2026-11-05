@@ -47,35 +47,38 @@ class CurriculumScheduler:
     Curriculum Learning Scheduler for Multi-Turn Agent Workflows:
     - Level 1: 1-step atomic actions (click, type, scroll, navigate), max_turns=4
     - Level 2: 2-3 step compound workflows (search -> select -> add to cart), max_turns=6
-    - Level 3: 5-8 step long-horizon workflows (full checkout, multi-step form wizard, cloud admin), max_turns=8
+    - Level 3: 5-8 step long-horizon workflows (full checkout, multi-step form wizard, cloud admin), max_turns=10
 
     Tracks moving success rate over a rolling window.
-    Advances to next level when moving success rate >= success_threshold (default 0.80).
+    Advances to next level when moving success rate >= success_threshold (default 0.80 over window_size=50),
+    or when max_episodes_per_level (default 300) safety cap is reached.
     """
 
     LEVEL_CONFIGS = {
         1: {"name": "Level 1: Focused (4 Turns)", "max_turns": 4, "complexity": 1},
         2: {"name": "Level 2: Compound (6 Turns)", "max_turns": 6, "complexity": 2},
-        3: {"name": "Level 3: Long-Horizon (8 Turns)", "max_turns": 8, "complexity": 3},
+        3: {"name": "Level 3: Long-Horizon (10 Turns)", "max_turns": 10, "complexity": 3},
     }
 
     def __init__(
         self,
         initial_level: int = 1,
         success_threshold: float = 0.80,
-        window_size: int = 10,
+        window_size: int = 50,
         min_episodes_per_level: int = 8,
+        max_episodes_per_level: int = 300,
     ):
         self.current_level = initial_level
         self.success_threshold = success_threshold
         self.window_size = window_size
         self.min_episodes_per_level = min_episodes_per_level
+        self.max_episodes_per_level = max_episodes_per_level
         self.history: List[float] = []
         self.episodes_in_current_level = 0
 
     @property
     def max_turns(self) -> int:
-        return self.LEVEL_CONFIGS.get(self.current_level, {}).get("max_turns", 8)
+        return self.LEVEL_CONFIGS.get(self.current_level, {}).get("max_turns", 10)
 
     @property
     def level_name(self) -> str:
@@ -98,11 +101,17 @@ class CurriculumScheduler:
                 self.history.pop(0)
             self.episodes_in_current_level += 1
 
-        if (
-            self.current_level < 3
-            and self.episodes_in_current_level >= self.min_episodes_per_level
-            and self.moving_success_rate >= self.success_threshold
-        ):
+        should_advance = False
+        if self.current_level < 3:
+            if self.episodes_in_current_level >= self.max_episodes_per_level:
+                should_advance = True  # Safety fallback cap reached
+            elif (
+                self.episodes_in_current_level >= self.min_episodes_per_level
+                and self.moving_success_rate >= self.success_threshold
+            ):
+                should_advance = True
+
+        if should_advance:
             self.current_level += 1
             self.episodes_in_current_level = 0
             self.history.clear()
@@ -225,18 +234,37 @@ def compute_shaped_reward(
     argument_weight: float = 0.3,
     step_penalty: float = 0.02,
     looping_penalty: float = 0.5,
+    outcome_supervised: bool = False,
 ) -> float:
     """
     Decoupled hierarchical reward formulation for digital LAM agents with terminal calibration:
     R = R_terminal + w_milestone * R_milestone + w_coord * R_coord
         + w_type * R_type + w_arg * R_arg - step_penalty - looping_penalty
 
-    Terminal reward calibration:
-    - Valid FINISH on satisfied state: +completion_bonus (+2.5)
-    - Premature FINISH on incomplete state: -premature_finish_penalty (-1.5)
-    - Timeout / non-FINISH truncation: -timeout_penalty (-0.5)
-    - None (legacy unconstrained): completion_bonus if goal_satisfied else 0.0
+    When outcome_supervised=True (JED-M2 v2.0):
+    - Valid task completion verified: +1.0
+    - Loops, crashes, or timeouts: -0.5
+    - Milestone increments: +0.15 * milestones_count
+    - Trajectory efficiency step penalty: -0.01 * turn_count
     """
+    if outcome_supervised:
+        # Long-Horizon Outcome-Supervised Reward
+        if goal_satisfied:
+            r_task = 1.0
+        elif repeated_action_count > 0:
+            r_task = -0.5
+        elif terminal_action is not None:
+            if str(terminal_action).upper().endswith("FINISH"):
+                r_task = -0.5  # Premature finish
+            else:
+                r_task = -0.5  # Timeout / truncation
+        else:
+            r_task = 0.0
+
+        r_milestone = 0.15 * max(0, milestones_count)
+        r_step = -0.01 * max(0, turn_count)
+        return round(r_task + r_milestone + r_step, 4)
+
     if terminal_action is not None:
         if isinstance(terminal_action, ActionType):
             term_enum = terminal_action
