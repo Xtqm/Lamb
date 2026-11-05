@@ -93,6 +93,18 @@ class CDPScriptCache:
         self.is_compiled = False
         return script
 
+    def register_routine(self, routine: Any) -> CachedScript:
+        """Registers a MicroScriptRoutine instance into the script cache."""
+        name = getattr(routine, "name", str(routine))
+        source = getattr(routine, "source", str(routine))
+        return self.register(name, source)
+
+    def register_workspace(self, workspace: Any) -> None:
+        """Registers all discovered routines from a MicroScriptWorkspace."""
+        routines = getattr(workspace, "routines", {})
+        for routine in routines.values():
+            self.register_routine(routine)
+
     def invalidate(self) -> None:
         """
         Invalidates cached script handles and resets compiled state.

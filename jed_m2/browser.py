@@ -17,6 +17,7 @@ STRICT CONVENTION: Pure ASCII console output (no multi-byte Unicode box-drawing 
 from dataclasses import dataclass, field
 import hashlib
 import io
+import json
 import logging
 import math
 import os
@@ -285,6 +286,56 @@ class PlaywrightStepResult(StepResult):
     delta_record: Optional[DOMDeltaRecord] = None
 
 
+def parse_routine_call(arg_str: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    """
+    Parses routine call expression from an action argument string.
+    Supports:
+    1. JSON object: '{"routine": "form_fill", "args": {"fields": {...}}}'
+    2. Functional syntax: 'form_fill({"fields": {...}})' or 'form_fill()'
+    3. Direct key mapping: '{"form_fill": {"fields": {...}}}'
+    4. Plain identifier: 'form_fill'
+    """
+    clean = arg_str.strip()
+    if not clean:
+        return None, {}
+
+    # 1. JSON object format
+    if clean.startswith("{") and clean.endswith("}"):
+        try:
+            data = json.loads(clean)
+            if isinstance(data, dict):
+                routine = data.get("routine") or data.get("name")
+                args = data.get("args") or data.get("parameters")
+                if routine and isinstance(args, dict):
+                    return str(routine), args
+                if routine and args is None:
+                    other_keys = {k: v for k, v in data.items() if k not in ("routine", "name")}
+                    return str(routine), other_keys
+                if len(data) == 1:
+                    k, v = next(iter(data.items()))
+                    if isinstance(v, dict):
+                        return str(k), v
+        except Exception:
+            pass
+
+    # 2. Functional syntax: routine_name(json_args)
+    if "(" in clean and clean.endswith(")"):
+        idx = clean.find("(")
+        routine = clean[:idx].strip()
+        inner = clean[idx + 1 : -1].strip()
+        if not inner:
+            return routine, {}
+        try:
+            parsed_args = json.loads(inner)
+            if isinstance(parsed_args, dict):
+                return routine, parsed_args
+        except Exception:
+            pass
+
+    # 3. Plain identifier
+    return clean, {}
+
+
 # ==============================================================================
 # 4. Canonical Playwright Environment
 # ==============================================================================
@@ -315,6 +366,7 @@ class PlaywrightEnvironment:
         use_differential_obs: bool = True,
         fixture_path: Optional[Union[str, Path]] = None,
         local_benchmark_url: Optional[str] = None,
+        workspace: Optional[Any] = None,
     ):
         self.config = config if config is not None else JEDM2Config()
         self.hidden_dim = self.config.hidden_dim
@@ -335,6 +387,12 @@ class PlaywrightEnvironment:
         self._shadow_registry: ShadowDOMRegistry = ShadowDOMRegistry()
         self.script_cache: CDPScriptCache = CDPScriptCache(enable_cdp_session=True)
         self._register_default_scripts()
+
+        # Micro-Script Workspace (.bcode/workspace/)
+        from jed_m2.bcode import MicroScriptWorkspace
+        self.workspace: MicroScriptWorkspace = workspace if workspace is not None else MicroScriptWorkspace()
+        self.script_cache.register_workspace(self.workspace)
+
         self.pointer_table: SymbolicPointerTable = SymbolicPointerTable()
         self.use_symbolic_pointers: bool = True
 
@@ -612,6 +670,8 @@ class PlaywrightEnvironment:
         """
         page = self._ensure_browser()
         if page is None or self._synthetic_dom_fallback:
+            if getattr(self, "current_state", None) is not None and self.current_state.elements:
+                return self.current_state.elements
             return self._get_fallback_elements()
 
         try:
@@ -1065,6 +1125,7 @@ class PlaywrightEnvironment:
 
         coords = coordinates if coordinates is not None else (0.5, 0.5)
         arg_str = argument if argument is not None else ""
+        routine_name: Optional[str] = None
 
         self.current_state.step_count += 1
         current_step = self.current_state.step_count
@@ -1133,6 +1194,25 @@ class PlaywrightEnvironment:
                         action_success = True
                     else:
                         action_error = "Empty URL provided for NAVIGATE action"
+                elif act_enum == ActionType.API_CALL:
+                    routine_name, routine_args = parse_routine_call(arg_str)
+                    if not routine_name:
+                        action_error = "No micro-script routine specified in API_CALL argument"
+                    elif self.workspace is not None and routine_name not in self.workspace.routines:
+                        action_error = f"Routine '{routine_name}' not found in workspace"
+                    else:
+                        is_valid = True
+                        if self.workspace is not None:
+                            is_valid, val_err = self.workspace.validate_arguments(routine_name, routine_args)
+                            if not is_valid:
+                                action_error = f"Routine validation failed: {val_err}"
+
+                        if is_valid and not action_error:
+                            res = self.script_cache.evaluate(page, routine_name, routine_args)
+                            action_success = True
+                            step_reward += 0.20
+                            if isinstance(res, dict) and not res.get("success", True):
+                                action_error = res.get("error", "Routine execution returned failure")
                 elif act_enum == ActionType.FINISH:
                     action_success = True
                 else:
@@ -1159,6 +1239,43 @@ class PlaywrightEnvironment:
                     action_error = "Predicted target is not a select control"
             elif act_enum == ActionType.TYPE:
                 step_reward += 0.10
+            elif act_enum == ActionType.API_CALL:
+                routine_name, routine_args = parse_routine_call(arg_str)
+                if not routine_name:
+                    action_success = False
+                    action_error = "No micro-script routine specified in API_CALL argument"
+                elif self.workspace is not None and routine_name not in self.workspace.routines:
+                    action_success = False
+                    action_error = f"Routine '{routine_name}' not found in workspace"
+                else:
+                    is_valid = True
+                    if self.workspace is not None:
+                        is_valid, val_err = self.workspace.validate_arguments(routine_name, routine_args)
+                        if not is_valid:
+                            action_success = False
+                            action_error = f"Routine validation failed: {val_err}"
+
+                    if is_valid and not action_error:
+                        action_success = True
+                        step_reward += 0.20
+                        if routine_name == "form_fill":
+                            fields = routine_args.get("fields", {})
+                            for sel, val in fields.items():
+                                clean_sel = sel.lstrip("#.").lower()
+                                for el in self.current_state.elements:
+                                    el_id = el.attributes.get("id", "").lower() if el.attributes else ""
+                                    el_name = el.attributes.get("name", "").lower() if el.attributes else ""
+                                    if clean_sel in (el.role.lower(), el.text.lower(), el_id, el_name):
+                                        el.value = str(val)
+                        elif routine_name == "batch_select":
+                            selections = routine_args.get("selections", {})
+                            for sel, val in selections.items():
+                                clean_sel = sel.lstrip("#.").lower()
+                                for el in self.current_state.elements:
+                                    el_id = el.attributes.get("id", "").lower() if el.attributes else ""
+                                    el_name = el.attributes.get("name", "").lower() if el.attributes else ""
+                                    if clean_sel in (el.role.lower(), el.text.lower(), el_id, el_name):
+                                        el.value = str(val)
 
         # Programmatic Oracle Evaluation
         oracle_details: Optional[Dict[str, Any]] = None
@@ -1219,6 +1336,7 @@ class PlaywrightEnvironment:
             "hit_element": hit_element.text if hit_element else None,
             "error": action_error,
             "oracle_checks": oracle_details,
+            "routine": routine_name,
         }
         self.action_history.append(action_log)
 
@@ -1243,6 +1361,7 @@ class PlaywrightEnvironment:
             "screenshot": screenshot,
             "elements": elements,
             "oracle_details": oracle_details,
+            "routine": routine_name,
             "scenario": self.active_scenario.scenario_id if self.active_scenario else None,
             "delta_record": delta_record,
             "is_delta": not delta_record.is_full_snapshot,
