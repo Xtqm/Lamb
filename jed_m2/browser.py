@@ -46,6 +46,7 @@ except ImportError:
 from jed_m2.cdp_cache import CDPScriptCache
 from jed_m2.config import JEDM2Config
 from jed_m2.core.types import UIElement
+from jed_m2.pointer_security import SymbolicPointerTable
 from jed_m2.dom_delta import (
     BROWSER_MUTATION_OBSERVER_INJECTION_JS,
     BROWSER_MUTATION_POLL_JS,
@@ -334,6 +335,8 @@ class PlaywrightEnvironment:
         self._shadow_registry: ShadowDOMRegistry = ShadowDOMRegistry()
         self.script_cache: CDPScriptCache = CDPScriptCache(enable_cdp_session=True)
         self._register_default_scripts()
+        self.pointer_table: SymbolicPointerTable = SymbolicPointerTable()
+        self.use_symbolic_pointers: bool = True
 
         # Scenarios catalog
         self.scenarios = get_default_scenarios()
@@ -626,22 +629,42 @@ class PlaywrightEnvironment:
 
         ui_elements: List[UIElement] = []
         for raw in raw_elements:
+            elem_id = int(raw["element_id"])
+            tag = str(raw["tag"])
+            role = str(raw["role"])
+            raw_text = str(raw["text"])
             bbox = (
                 float(raw["bbox"][0]),
                 float(raw["bbox"][1]),
                 float(raw["bbox"][2]),
                 float(raw["bbox"][3]),
             )
+            node_h = ""
+            text_h = ""
+            if hasattr(self, "pointer_table") and self.pointer_table is not None:
+                ptr = self.pointer_table.register_element(
+                    element_id=elem_id,
+                    tag=tag,
+                    role=role,
+                    raw_text=raw_text,
+                    bbox=bbox,
+                    attributes={"value": str(raw.get("value", ""))},
+                )
+                node_h = ptr.handle
+                text_h = f"$TEXT_{ptr.hash_digest}"
+
             ui_elements.append(
                 UIElement(
-                    element_id=int(raw["element_id"]),
-                    tag=str(raw["tag"]),
-                    role=str(raw["role"]),
-                    text=str(raw["text"]),
+                    element_id=elem_id,
+                    tag=tag,
+                    role=role,
+                    text=raw_text,
                     bbox=bbox,
                     value=str(raw.get("value", "")),
                     is_clickable=bool(raw.get("is_clickable", True)),
                     is_input=bool(raw.get("is_input", False)),
+                    node_handle=node_h,
+                    text_handle=text_h,
                 )
             )
 
@@ -654,28 +677,36 @@ class PlaywrightEnvironment:
             if hasattr(self, "active_scenario") and self.active_scenario
             else "ecommerce"
         )
+
+        def _make_el(eid: int, tag: str, role: str, text: str, bbox: Tuple[float, float, float, float], is_clickable: bool = True, is_input: bool = False):
+            nh, th = "", ""
+            if hasattr(self, "pointer_table") and self.pointer_table is not None:
+                ptr = self.pointer_table.register_element(eid, tag, role, text, bbox)
+                nh, th = ptr.handle, f"$TEXT_{ptr.hash_digest}"
+            return UIElement(eid, tag, role, text, bbox, is_clickable=is_clickable, is_input=is_input, node_handle=nh, text_handle=th)
+
         if scenario_id == "ecommerce":
             return [
-                UIElement(1, "input", "search_bar", "Search products...", (0.20, 0.08, 0.70, 0.14), is_clickable=True, is_input=True),
-                UIElement(2, "button", "search_btn", "Search", (0.72, 0.08, 0.85, 0.14), is_clickable=True),
-                UIElement(3, "button", "add_to_cart", "Add to Cart", (0.35, 0.40, 0.50, 0.48), is_clickable=True),
+                _make_el(1, "input", "search_bar", "Search products...", (0.20, 0.08, 0.70, 0.14), is_clickable=True, is_input=True),
+                _make_el(2, "button", "search_btn", "Search", (0.72, 0.08, 0.85, 0.14), is_clickable=True),
+                _make_el(3, "button", "add_to_cart", "Add to Cart", (0.35, 0.40, 0.50, 0.48), is_clickable=True),
             ]
         elif scenario_id == "form_portal":
             return [
-                UIElement(1, "input", "name_input", "Full Name", (0.20, 0.15, 0.60, 0.22), is_clickable=True, is_input=True),
-                UIElement(2, "input", "email_input", "Email Address", (0.20, 0.25, 0.60, 0.32), is_clickable=True, is_input=True),
-                UIElement(3, "button", "submit_btn", "Submit Request", (0.20, 0.45, 0.40, 0.52), is_clickable=True),
+                _make_el(1, "input", "name_input", "Full Name", (0.20, 0.15, 0.60, 0.22), is_clickable=True, is_input=True),
+                _make_el(2, "input", "email_input", "Email Address", (0.20, 0.25, 0.60, 0.32), is_clickable=True, is_input=True),
+                _make_el(3, "button", "submit_btn", "Submit Request", (0.20, 0.45, 0.40, 0.52), is_clickable=True),
             ]
         elif scenario_id == "travel":
             return [
-                UIElement(1, "input", "destination_input", "Enter City", (0.20, 0.10, 0.60, 0.18), is_clickable=True, is_input=True),
-                UIElement(2, "button", "reserve_btn", "Reserve Room", (0.65, 0.30, 0.85, 0.38), is_clickable=True),
+                _make_el(1, "input", "destination_input", "Enter City", (0.20, 0.10, 0.60, 0.18), is_clickable=True, is_input=True),
+                _make_el(2, "button", "reserve_btn", "Reserve Room", (0.65, 0.30, 0.85, 0.38), is_clickable=True),
             ]
         else:
             return [
-                UIElement(1, "button", "btn_1", "Interactive Button 1", (0.1, 0.1, 0.3, 0.2), is_clickable=True),
-                UIElement(2, "input", "inp_1", "Search or input", (0.4, 0.1, 0.7, 0.2), is_clickable=True, is_input=True),
-                UIElement(3, "a", "link_1", "Home Link", (0.8, 0.1, 0.95, 0.2), is_clickable=True),
+                _make_el(1, "button", "btn_1", "Interactive Button 1", (0.1, 0.1, 0.3, 0.2), is_clickable=True),
+                _make_el(2, "input", "inp_1", "Search or input", (0.4, 0.1, 0.7, 0.2), is_clickable=True, is_input=True),
+                _make_el(3, "a", "link_1", "Home Link", (0.8, 0.1, 0.95, 0.2), is_clickable=True),
             ]
 
     def capture_screenshot(
@@ -808,7 +839,7 @@ class PlaywrightEnvironment:
             self._prev_elements = list(elements)
             self._shadow_registry.reset(elements)
             self._poll_browser_mutations()
-            return delta_rec.to_obs_string(), delta_rec
+            return delta_rec.to_obs_string(use_symbolic_pointers=self.use_symbolic_pointers), delta_rec
 
         # Intermediate step: differential delta
         mutations = diff_elements(self._prev_elements, elements)
@@ -825,7 +856,7 @@ class PlaywrightEnvironment:
             self._prev_elements = list(elements)
             self._shadow_registry.reset(elements)
             self._poll_browser_mutations()
-            return delta_rec.to_obs_string(), delta_rec
+            return delta_rec.to_obs_string(use_symbolic_pointers=self.use_symbolic_pointers), delta_rec
 
         delta_rec = DOMDeltaRecord(
             mutations=mutations,
@@ -836,7 +867,7 @@ class PlaywrightEnvironment:
         self._shadow_registry.apply_delta(delta_rec)
         self._prev_elements = list(elements)
         self._poll_browser_mutations()
-        return delta_rec.to_obs_string(), delta_rec
+        return delta_rec.to_obs_string(use_symbolic_pointers=self.use_symbolic_pointers), delta_rec
 
     def _format_observation_text(self, is_delta: bool = False, is_nav: bool = False) -> str:
         """Formats concise text observation matching pretraining grammar: URL: ... | DOM: <button ...>."""
@@ -943,6 +974,8 @@ class PlaywrightEnvironment:
             elif fixture_file and fixture_file.exists():
                 url = f"file:///{fixture_file.resolve().as_posix()}"
 
+        if hasattr(self, "pointer_table") and self.pointer_table is not None:
+            self.pointer_table.clear()
         elements = self.extract_interactive_elements()
         screenshot = self.capture_screenshot(as_tensor=True)
         raw_tree = self.get_accessibility_snapshot()
@@ -1164,6 +1197,8 @@ class PlaywrightEnvironment:
             curr_url = self.current_state.url
             curr_title = self.current_state.title
 
+        if hasattr(self, "pointer_table") and self.pointer_table is not None:
+            self.pointer_table.clear()
         elements = self.extract_interactive_elements()
         screenshot = self.capture_screenshot(as_tensor=True)
         raw_tree = self.get_accessibility_snapshot()

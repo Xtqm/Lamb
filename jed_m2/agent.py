@@ -27,6 +27,7 @@ from jed_m2.dataset import SimpleLAMTokenizer
 from jed_m2.environment import StepResult, WebOSEnvironment
 from jed_m2.heads import ActionOutput, ActionType
 from jed_m2.model import JEDM2Model
+from jed_m2.pointer_security import CapabilityMask, SymbolicPointerTable
 
 
 # ==============================================================================
@@ -147,10 +148,14 @@ class JEDM2Agent:
         jepa_planning_lambda: float = 1.0,
         snap_coordinates_to_candidates: bool = True,
         max_snap_distance: Optional[float] = 0.35,
+        capability_mask: Optional[CapabilityMask] = None,
+        pointer_table: Optional[SymbolicPointerTable] = None,
     ):
         self.model = model
         self.config = config if config is not None else getattr(model, "config", JEDM2Config())
         self.tokenizer = tokenizer if tokenizer is not None else ActionBPETokenizer(self.config.vocab_size)
+        self.capability_mask = capability_mask
+        self.pointer_table = pointer_table
 
         if device is None:
             # Infer device from model parameters
@@ -884,24 +889,88 @@ class JEDM2Agent:
             candidate_elements=candidate_elements,
         )
 
-        step_res = env.step(
-            action_type=agent_output.action_type,
-            coordinates=agent_output.coordinates,
-            argument=agent_output.argument,
-        )
+        # Boundary de-referencing: resolve slot values and node handles
+        dispatch_argument = agent_output.argument
+        table = self.pointer_table or getattr(env, "pointer_table", None)
+        if dispatch_argument and table is not None:
+            if dispatch_argument.startswith("$SLOT_") or dispatch_argument.startswith("slot:"):
+                slot_val = table.get_slot_value(dispatch_argument)
+                if slot_val is not None:
+                    dispatch_argument = slot_val
 
-        is_done = step_res.done or agent_output.is_terminal
+        dispatch_coordinates = agent_output.coordinates
+        if table is not None and dispatch_argument and dispatch_argument.startswith("$NODE_"):
+            resolved_center = table.resolve_center(dispatch_argument)
+            if resolved_center is not None:
+                dispatch_coordinates = resolved_center
+
         is_delta = getattr(agent_output, "is_delta", False) or ("<obs delta>" in obs_text)
         delta_tokens_count = getattr(agent_output, "obs_token_count", 0)
         prefill_savings = max(0, 350 - delta_tokens_count) if is_delta else 0
+
+        # Security policy enforcement: CapabilityMask
+        mask = self.capability_mask or getattr(env, "capability_mask", None)
+        if mask is not None:
+            target_url = getattr(env, "current_url", None)
+            if not target_url and hasattr(env, "current_state") and env.current_state is not None:
+                target_url = getattr(env.current_state, "url", None)
+
+            check_url = target_url
+            if agent_output.action_type == ActionType.NAVIGATE and dispatch_argument:
+                check_url = dispatch_argument
+
+            is_allowed, violation_err = mask.validate_action(
+                action_type=agent_output.action_type,
+                target_url=check_url,
+            )
+            if not is_allowed:
+                agent_output.is_terminal = True
+                dummy_feat = (
+                    obs_features
+                    if obs_features is not None
+                    else torch.zeros(self.config.hidden_dim, device=self.device)
+                )
+                step_res = StepResult(
+                    obs_text=f"[SECURITY BLOCKED: {violation_err}]",
+                    obs_features=dummy_feat,
+                    reward=-1.0,
+                    done=True,
+                    truncated=False,
+                    info={"security_violation": violation_err, "blocked_action": agent_output.action_name},
+                )
+                record = TurnRecord(
+                    turn_id=self.turn_count,
+                    obs_text=obs_text,
+                    thought=f"[SECURITY BLOCKED] {violation_err}",
+                    action_name="SECURITY_BLOCKED",
+                    coordinates=dispatch_coordinates,
+                    argument=dispatch_argument,
+                    reward=-1.0,
+                    done=True,
+                    gate_prob=agent_output.gate_prob,
+                    is_delta=is_delta,
+                    delta_tokens_count=delta_tokens_count,
+                    prefill_savings=prefill_savings,
+                )
+                self.history.append(record)
+                self.turn_count += 1
+                return agent_output, step_res
+
+        step_res = env.step(
+            action_type=agent_output.action_type,
+            coordinates=dispatch_coordinates,
+            argument=dispatch_argument,
+        )
+
+        is_done = step_res.done or agent_output.is_terminal
 
         record = TurnRecord(
             turn_id=self.turn_count,
             obs_text=obs_text,
             thought=agent_output.thought,
             action_name=agent_output.action_name,
-            coordinates=agent_output.coordinates,
-            argument=agent_output.argument,
+            coordinates=dispatch_coordinates,
+            argument=dispatch_argument,
             reward=step_res.reward,
             done=is_done,
             gate_prob=agent_output.gate_prob,
@@ -931,3 +1000,7 @@ class JEDM2Agent:
                 break
 
         return list(self.history)
+
+
+# Alias for canonical runtime interface
+AgentRuntime = JEDM2Agent

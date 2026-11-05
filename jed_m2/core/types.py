@@ -33,6 +33,8 @@ class UIElement:
     is_focused: bool = False
     attributes: Dict[str, str] = field(default_factory=dict)
     has_bbox: bool = True  # False when the source observation did not provide geometry
+    node_handle: str = ""  # Symbolic pointer handle (e.g., "$NODE_1")
+    text_handle: str = ""  # Symbolic text digest handle (e.g., "$TEXT_7b8a")
 
     @property
     def center(self) -> Tuple[float, float]:
@@ -77,6 +79,22 @@ class UIElement:
         return (
             f"<{self.tag} id={self.element_id} role='{self.role}' "
             f"bbox='{bbox_text}'{attrs}>{clean_text}</{self.tag}>"
+        )
+
+    def to_symbolic_string(self) -> str:
+        """Serializes element using opaque symbolic handles to prevent indirect prompt injection."""
+        cx, cy = self.center
+        h = self.node_handle or f"$NODE_{self.element_id}"
+        t = self.text_handle or "$TEXT_bound"
+        attrs = ""
+        if self.attributes and "type" in self.attributes:
+            attrs += f" type='{self.attributes['type']}'"
+        if self.is_focused:
+            attrs += " focused='true'"
+        bbox_text = f"[{cx:.2f},{cy:.2f}]" if self.has_bbox else "unavailable"
+        return (
+            f"<{self.tag} handle='{h}' role='{self.role}' "
+            f"bbox='{bbox_text}'{attrs} text_handle='{t}'></{self.tag}>"
         )
 
     def to_dict(self) -> Dict[str, Any]:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
 import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -47,20 +48,18 @@ class DOMMutation:
     bbox: Optional[Tuple[float, float, float, float]] = None
     attributes: Dict[str, Any] = field(default_factory=dict)
 
-    def to_grammar_string(self) -> str:
+    def to_grammar_string(self, use_symbolic_pointers: bool = False) -> str:
         """
         Serializes mutation to compact, token-efficient grammar representation.
         Format:
           ADD:    + <tag id=N role='R' bbox='[cx,cy]' [attrs]>text</tag>
           REMOVE: - id=N
           MODIFY: ~ id=N [text='...'] [value='...'] [bbox='[cx,cy]']
+        When use_symbolic_pointers=True, masks untrusted text behind $TEXT_<hash> and $NODE_N.
         """
         if self.mutation_type == DOMMutationType.ADD:
             tag = self.tag or "element"
             role = self.role or tag
-            clean_text = (self.text or "").replace("\n", " ").strip()
-            if len(clean_text) > 30:
-                clean_text = clean_text[:27] + "..."
             
             bbox_str = ""
             if self.bbox is not None and len(self.bbox) >= 4:
@@ -69,19 +68,39 @@ class DOMMutation:
                 bbox_str = f" bbox='[{cx:.2f},{cy:.2f}]'"
             
             attrs_str = ""
-            if self.value:
+            if self.value and not use_symbolic_pointers:
                 attrs_str += f" value='{self.value}'"
             if self.attributes:
                 for k, v in sorted(self.attributes.items()):
                     if k != "value":
                         attrs_str += f" {k}='{v}'"
+
+            if use_symbolic_pointers:
+                digest = hashlib.sha256((self.text or "").encode("utf-8", errors="ignore")).hexdigest()[:8]
+                return f"+ <{tag} handle='$NODE_{self.element_id}' role='{role}'{bbox_str}{attrs_str} text_handle='$TEXT_{digest}'></{tag}>"
             
+            clean_text = (self.text or "").replace("\n", " ").strip()
+            if len(clean_text) > 30:
+                clean_text = clean_text[:27] + "..."
             return f"+ <{tag} id={self.element_id} role='{role}'{bbox_str}{attrs_str}>{clean_text}</{tag}>"
 
         elif self.mutation_type == DOMMutationType.REMOVE:
+            if use_symbolic_pointers:
+                return f"- handle='$NODE_{self.element_id}'"
             return f"- id={self.element_id}"
 
         elif self.mutation_type == DOMMutationType.MODIFY:
+            if use_symbolic_pointers:
+                parts = [f"~ handle='$NODE_{self.element_id}'"]
+                if self.text is not None:
+                    digest = hashlib.sha256(self.text.encode("utf-8", errors="ignore")).hexdigest()[:8]
+                    parts.append(f"text_handle='$TEXT_{digest}'")
+                if self.bbox is not None and len(self.bbox) >= 4:
+                    cx = (self.bbox[0] + self.bbox[2]) / 2.0
+                    cy = (self.bbox[1] + self.bbox[3]) / 2.0
+                    parts.append(f"bbox='[{cx:.2f},{cy:.2f}]'")
+                return " ".join(parts)
+
             parts = [f"~ id={self.element_id}"]
             if self.text is not None:
                 clean_text = self.text.replace("\n", " ").strip()
@@ -115,21 +134,24 @@ class DOMDeltaRecord:
     step: int = 0
     full_elements: Optional[List[UIElement]] = None
 
-    def to_obs_string(self) -> str:
+    def to_obs_string(self, use_symbolic_pointers: bool = False) -> str:
         """
         Formats observation string for model prefill ingestion.
         """
         prefix = f"URL: {self.url} | " if self.url else ""
         if self.is_full_snapshot:
             if self.full_elements:
-                dom_str = " ".join([el.to_dom_string() for el in self.full_elements[:64]])
+                if use_symbolic_pointers:
+                    dom_str = " ".join([el.to_symbolic_string() for el in self.full_elements[:64]])
+                else:
+                    dom_str = " ".join([el.to_dom_string() for el in self.full_elements[:64]])
                 return f"<obs full> {prefix}DOM: {dom_str} </obs>"
             return f"<obs full> {prefix}DOM: [No interactive elements] </obs>"
 
         if not self.mutations:
             return f"<obs delta> {prefix}[NO_OP] </obs>"
 
-        mut_str = " ".join([m.to_grammar_string() for m in self.mutations])
+        mut_str = " ".join([m.to_grammar_string(use_symbolic_pointers=use_symbolic_pointers) for m in self.mutations])
         return f"<obs delta> {prefix}{mut_str} </obs>"
 
 
