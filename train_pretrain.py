@@ -25,6 +25,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from jed_m2.config import JEDM2Config, JEDM2MediumConfig
+from jed_m2.dataset import AgentTrajectoryDataset
 from jed_m2.losses import JEDM2LossConfig
 from jed_m2.model import JEDM2Model, create_jed_m2_medium, create_jed_m2_nano
 from jed_m2.real_dataset import RealTrajectoryCollator, RealWebTrajectoryDataset
@@ -33,6 +34,35 @@ from jed_m2.trainer import (
     JEDM2TrainerConfig,
     probe_training_device,
 )
+
+
+class InterleavedWebDataset(torch.utils.data.Dataset):
+    """
+    Deterministic 60% Real Web HTML / 40% Combinatorial Procedural Gym batch mixture (Guardrail 4A).
+    Guarantees both real web HTML and procedural gym tasks are interleaved deterministically in every batch.
+    """
+
+    def __init__(self, real_dataset: Any, synth_dataset: Any, real_ratio: float = 0.60):
+        self.real_dataset = real_dataset
+        self.synth_dataset = synth_dataset
+        self.real_ratio = real_ratio
+        self.length = int(len(real_dataset) / real_ratio)
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, idx: int) -> Any:
+        slot = idx % 5
+        if slot < 3:
+            real_idx = (idx // 5 * 3 + slot) % len(self.real_dataset)
+            sample = self.real_dataset[real_idx]
+            sample.is_real = True
+            return sample
+        else:
+            synth_idx = (idx // 5 * 2 + (slot - 3)) % len(self.synth_dataset)
+            sample = self.synth_dataset[synth_idx]
+            sample.is_real = False
+            return sample
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_dataset_size", type=int, default=500, help="Number of samples in val split")
     parser.add_argument("--cache_dir", type=str, default="data/real_trajectories_cache", help="Directory for cached tensors")
     parser.add_argument("--use_unified_dataset", action="store_true", help="Load unified multi-corpus pretraining dataset (Mind2Web + WebArena)")
+    parser.add_argument("--interleaved", action="store_true", default=True, help="Use 60/40 Real Web / Procedural Gym interleaved mixture (Guardrail 4A)")
     parser.add_argument("--force_rebuild_dataset", action="store_true", help="Force rebuild real trajectory cache")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
 
@@ -199,6 +230,20 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
     print(f"Train Dataset Size    : {len(train_dataset)} trajectories")
     print(f"Validation Dataset    : {len(val_dataset)} trajectories")
 
+    if args.interleaved:
+        print("\nConfiguring 60/40 Real Web HTML / Combinatorial Procedural Gym Interleaved Mixture...")
+        synth_dataset = AgentTrajectoryDataset(
+            config=config,
+            virtual_size=len(train_dataset),
+            seed=args.seed + 777,
+        )
+        train_dataset = InterleavedWebDataset(
+            real_dataset=train_dataset,
+            synth_dataset=synth_dataset,
+            real_ratio=0.60,
+        )
+        print(f"Interleaved Train Dataset: {len(train_dataset)} trajectories (60% Real / 40% Procedural Gym)")
+
     collator = RealTrajectoryCollator(config=config, max_seq_len=args.seq_len)
 
     train_loader = DataLoader(
@@ -305,6 +350,7 @@ def train_pretrain(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
                 f"Reason: {avg_metrics.get('loss_reason', 0.0):5.2f} | "
                 f"ActAcc: {avg_metrics.get('acc_action_type', 0.0)*100:4.1f}% | "
                 f"CoordMAE: {avg_metrics.get('coord_mae', 0.0):.4f} | "
+                f"MoE: R:{avg_metrics.get('moe_entropy_real', 0.0):.2f}/S:{avg_metrics.get('moe_entropy_synth', 0.0):.2f} | "
                 f"JEPASim: {avg_metrics.get('jepa_cos_sim', 0.0):.3f} | "
                 f"GradNorm: {grad_norm_val:5.2f} | "
                 f"LR: {cur_lr:.2e} | "

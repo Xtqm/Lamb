@@ -62,23 +62,33 @@ class UIElement:
         x_min, y_min, x_max, y_max = self.bbox
         return (x_min <= x <= x_max) and (y_min <= y <= y_max)
 
-    def to_dom_string(self) -> str:
+    def to_dom_string(self, drop_id_class: bool = False) -> str:
         """Serializes element to concise accessibility DOM representation."""
         cx, cy = self.center
         clean_text = self.text.replace("\n", " ").strip()
         if len(clean_text) > 40:
             clean_text = clean_text[:37] + "..."
         attrs = ""
-        if self.attributes and "type" in self.attributes:
-            attrs += f" type='{self.attributes['type']}'"
+        drop = drop_id_class or bool(self.attributes and self.attributes.get("__drop_id_class__"))
+        if not drop:
+            attrs += f" id={self.element_id}"
+            if self.attributes and "class" in self.attributes:
+                attrs += f" class='{self.attributes['class']}'"
+        if self.attributes:
+            if "data-testid" in self.attributes:
+                attrs += f" data-testid='{self.attributes['data-testid']}'"
+            if "aria-label" in self.attributes:
+                attrs += f" aria-label='{self.attributes['aria-label']}'"
+            if "type" in self.attributes:
+                attrs += f" type='{self.attributes['type']}'"
         if self.value:
             attrs += f" value='{self.value}'"
         if self.is_focused:
             attrs += " focused='true'"
         bbox_text = f"[{cx:.2f},{cy:.2f}]" if self.has_bbox else "unavailable"
         return (
-            f"<{self.tag} id={self.element_id} role='{self.role}' "
-            f"bbox='{bbox_text}'{attrs}>{clean_text}</{self.tag}>"
+            f"<{self.tag}{attrs} role='{self.role}' "
+            f"bbox='{bbox_text}'>{clean_text}</{self.tag}>"
         )
 
     def to_symbolic_string(self) -> str:

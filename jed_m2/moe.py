@@ -69,6 +69,7 @@ class SparseTop2MoE(nn.Module):
 
         # Router: Linear projection from hidden_dim to num_experts
         self.router = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
+        self.last_routing_stats = {}
 
         # Expert MLPs
         expert_cls = SwiGLUFeedForward if config.activation == "swiglu" else GELUFeedForward
@@ -77,12 +78,18 @@ class SparseTop2MoE(nn.Module):
             for _ in range(self.num_experts)
         ])
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        source_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass for Sparse Top-2 MoE.
+        Forward pass for Sparse Top-2 MoE with optional Per-Source Load Balancing (Guardrail 4A).
 
         Args:
             x: Input tensor of shape [batch_size, seq_len, hidden_dim]
+            source_mask: Optional tensor indicating sample source: 1 for REAL, 0 for SYNTH.
+                         Shape [batch_size] or [batch_size, seq_len].
 
         Returns:
             Tuple of:
@@ -117,21 +124,63 @@ class SparseTop2MoE(nn.Module):
         top2_weights = top2_weights.to(dtype=x.dtype)
 
         # ==========================================
-        # 3. Auxiliary Load-Balancing Loss
+        # 3. Auxiliary Load-Balancing Loss (Guardrail 4A)
         # ==========================================
-        # P_i: Average probability allocated to expert i across all tokens
-        # P_i retains gradients back to router parameters
-        # p_i: [num_experts]
-        p_i = router_probs.mean(dim=0)
-
-        # f_i: Fraction of tokens routed to expert i in Top-2 selection
         # One-hot encoding of selected experts: [num_tokens, 2, num_experts] -> [num_tokens, num_experts]
         expert_mask = F.one_hot(top2_indices, num_classes=self.num_experts).sum(dim=1)
-        # Detach f_i as token assignment is a discrete routing decision
-        f_i = expert_mask.float().mean(dim=0).detach()
 
-        # L_aux = aux_loss_coef * N * sum_{i=1}^N (f_i * P_i)
-        aux_loss = self.aux_loss_coef * (self.num_experts * torch.sum(f_i * p_i))
+        if source_mask is not None:
+            if source_mask.dim() == 1:
+                source_mask_expanded = source_mask.unsqueeze(1).expand(b_sz, seq_len)
+            else:
+                source_mask_expanded = source_mask
+            source_mask_flat = source_mask_expanded.reshape(-1)
+
+            real_indices = (source_mask_flat > 0.5).nonzero(as_tuple=True)[0]
+            synth_indices = (source_mask_flat <= 0.5).nonzero(as_tuple=True)[0]
+
+            has_real = (real_indices.numel() > 0)
+            has_synth = (synth_indices.numel() > 0)
+
+            if has_real and has_synth:
+                p_real = router_probs[real_indices].mean(dim=0)
+                f_real = expert_mask[real_indices].float().mean(dim=0).detach()
+                l_balance_real = self.num_experts * torch.sum(f_real * p_real)
+
+                p_synth = router_probs[synth_indices].mean(dim=0)
+                f_synth = expert_mask[synth_indices].float().mean(dim=0).detach()
+                l_balance_synth = self.num_experts * torch.sum(f_synth * p_synth)
+
+                aux_loss = self.aux_loss_coef * (l_balance_real + l_balance_synth)
+
+                h_real = -(p_real * torch.log(p_real + 1e-12)).sum().item()
+                h_synth = -(p_synth * torch.log(p_synth + 1e-12)).sum().item()
+                self.last_routing_stats = {
+                    "entropy_real": h_real,
+                    "entropy_synth": h_synth,
+                    "loss_real": l_balance_real.item(),
+                    "loss_synth": l_balance_synth.item(),
+                }
+            else:
+                p_i = router_probs.mean(dim=0)
+                f_i = expert_mask.float().mean(dim=0).detach()
+                aux_loss = self.aux_loss_coef * (self.num_experts * torch.sum(f_i * p_i))
+                h_all = -(p_i * torch.log(p_i + 1e-12)).sum().item()
+                self.last_routing_stats = {
+                    "entropy_real": h_all if has_real else 0.0,
+                    "entropy_synth": h_all if has_synth else 0.0,
+                    "loss_real": (self.num_experts * torch.sum(f_i * p_i)).item() if has_real else 0.0,
+                    "loss_synth": (self.num_experts * torch.sum(f_i * p_i)).item() if has_synth else 0.0,
+                }
+        else:
+            # P_i: Average probability allocated to expert i across all tokens
+            p_i = router_probs.mean(dim=0)
+            # f_i: Fraction of tokens routed to expert i in Top-2 selection
+            f_i = expert_mask.float().mean(dim=0).detach()
+            # L_aux = aux_loss_coef * N * sum_{i=1}^N (f_i * P_i)
+            aux_loss = self.aux_loss_coef * (self.num_experts * torch.sum(f_i * p_i))
+            h_all = -(p_i * torch.log(p_i + 1e-12)).sum().item()
+            self.last_routing_stats = {"entropy_real": h_all, "entropy_synth": h_all}
 
         # ==========================================
         # 4. Expert Dispatch & Weighted Output

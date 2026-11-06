@@ -130,104 +130,418 @@ class SyntheticTrajectoryGenerator:
     and rationale tokens.
     """
 
-    DOM_TAGS = ["button", "input", "a", "select", "div", "textarea", "span"]
-    ROLES = ["search_bar", "submit_btn", "nav_link", "filter_select", "item_card", "checkout_btn", "close_icon"]
+    DOM_TAGS = ["button", "input", "a", "select", "div", "textarea", "span", "header", "nav", "footer"]
+    ROLES = [
+        "search_bar", "submit_btn", "nav_link", "filter_select", "item_card",
+        "checkout_btn", "close_icon", "menu_item", "tab", "dialog"
+    ]
+
+    # Guardrail 2A: Bounded BPE CSS Vocabulary (Tailwind, Bootstrap, MUI, Shadcn)
+    BOUNDED_CLASSES = [
+        "btn", "btn-primary", "btn-secondary", "btn-outline", "btn-sm",
+        "form-control", "input-field", "text-input", "select-input",
+        "card", "card-body", "card-header", "modal-content", "dropdown-menu",
+        "flex", "flex-col", "flex-row", "items-center", "justify-between",
+        "grid", "grid-cols-2", "grid-cols-4", "gap-2", "gap-4",
+        "p-2", "p-4", "px-3", "py-2", "px-4", "py-3", "m-2", "my-4",
+        "text-sm", "text-base", "text-lg", "font-medium", "font-bold",
+        "text-gray-700", "text-gray-900", "text-white", "bg-blue-600",
+        "rounded-md", "rounded-lg", "border", "border-gray-300", "shadow-sm",
+    ]
+
+    BOUNDED_TEST_IDS = [
+        "submit-btn", "search-input", "filter-select", "checkout-btn", "apply-btn",
+        "confirm-btn", "item-row", "nav-link", "modal-close", "tab-active",
+        "action-menu", "save-btn", "cancel-btn", "date-picker", "quantity-select",
+    ]
+
+    BOUNDED_ARIA_LABELS = [
+        "Search", "Submit form", "Apply discount", "Confirm selection", "Close modal",
+        "Next page", "Previous page", "Select option", "Filter results", "Checkout",
+        "Delete item", "Edit details", "Save changes", "View cart", "User profile",
+    ]
 
     compute_obs_features = staticmethod(compute_obs_features)
 
-    # Trajectory workflow templates covering diverse interactive domains
-    SCENARIOS = [
+    # 20+ Domain Archetypes with Adversarial Near-Miss Entity Generators (Workstream 2)
+    ARCHETYPES = [
+        # 1. E-Commerce & Retail
         {
             "domain": "ecommerce",
-            "goal": "Search for noise-cancelling headphones and add top result to cart",
-            "steps": [
-                (ActionType.TYPE, "input", "search_bar", "search_input", "Sony WH-1000XM5", "Type search query into product search bar"),
-                (ActionType.CLICK, "button", "submit_btn", "search_button", "", "Click search button to execute query"),
-                (ActionType.SCROLL, "div", "item_card", "product_listing", "scroll_down", "Scroll results listing to inspect pricing"),
-                (ActionType.CLICK, "a", "item_card", "first_product_link", "", "Click product link to open details page"),
-                (ActionType.CLICK, "button", "checkout_btn", "add_to_cart", "", "Click Add to Cart button to complete objective"),
-                (ActionType.FINISH, "div", "checkout_btn", "finish_marker", "success", "Confirm item added and finish task"),
+            "archetype": "E-Commerce & Retail",
+            "goal_fn": lambda r: f"Your expired promo code was {r['d1']} and loyalty code {r['d2']}; apply active discount code {r['target']} to order #{r['d3']} and proceed to checkout",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["VIP25", "FALL20", "SAVE15", "SUMMER30", "CYBER40"]),
+                "d1": rng.choice(["EXPIRED10", "OLD5", "SPRING10", "WINTER5"]),
+                "d2": rng.choice(["LOYALTY5", "MEMBER10", "REWARDS2"]),
+                "d3": rng.choice(["88412", "99104", "77231", "66519"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.CLICK, "button", "cart_btn", "view_cart_button", "", "Open cart review modal"),
+                (ActionType.TYPE, "input", "coupon_input", "promo_input_field", e["target"], f"Enter active promo coupon code {e['target']}"),
+                (ActionType.CLICK, "button", "apply_btn", "apply_discount_button", "", "Apply promo discount code"),
+                (ActionType.CLICK, "button", "checkout_btn", "proceed_checkout_button", "", "Proceed to checkout"),
+                (ActionType.FINISH, "div", "checkout_btn", "order_confirmation", "success", "Confirm checkout initiation"),
             ],
         },
+        # 2. Travel & Booking
         {
             "domain": "travel",
-            "goal": "Book hotel in San Francisco for upcoming weekend",
-            "steps": [
-                (ActionType.NAVIGATE, "input", "nav_link", "url_bar", "https://travel.booking.internal/hotels", "Navigate to hotel booking portal"),
-                (ActionType.TYPE, "input", "search_bar", "location_input", "San Francisco, CA", "Enter destination city"),
-                (ActionType.CLICK, "select", "filter_select", "date_picker", "2026-10-24", "Select check-in weekend dates"),
-                (ActionType.CLICK, "button", "submit_btn", "search_hotels", "", "Click search hotels button"),
-                (ActionType.CLICK, "button", "item_card", "reserve_room", "", "Select first available room reservation"),
-                (ActionType.FINISH, "div", "checkout_btn", "finish_marker", "booked", "Finish reservation workflow"),
+            "archetype": "Travel & Booking",
+            "goal_fn": lambda r: f"Departing from {r['d1']} with transit at {r['d2']}, search destination {r['target']} checking in on {r['d3']} for guest {r['d4']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["Seattle, WA", "Austin, TX", "Denver, CO", "Boston, MA", "Miami, FL"]),
+                "d1": rng.choice(["SFO", "LAX", "ORD", "JFK", "ATL"]),
+                "d2": rng.choice(["DFW", "DEN", "MSP", "CLT"]),
+                "d3": rng.choice(["2026-11-15", "2026-12-01", "2026-11-20", "2026-12-10"]),
+                "d4": rng.choice(["Alex Chen", "Elena Rostova", "Marcus Vance", "Sarah Jenkins"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.NAVIGATE, "input", "nav_link", "url_address_bar", "https://travel.booking.internal/search", "Navigate to booking engine"),
+                (ActionType.TYPE, "input", "search_bar", "destination_input_field", e["target"], f"Enter target destination city {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "search_hotels_button", "", "Execute destination search"),
+                (ActionType.CLICK, "button", "item_card", "select_hotel_room_button", "", "Select preferred hotel room"),
+                (ActionType.FINISH, "div", "checkout_btn", "booking_confirmation_banner", "confirmed", "Confirm hotel booking"),
             ],
         },
-        {
-            "domain": "os_admin",
-            "goal": "Update security group rules in cloud administration console",
-            "steps": [
-                (ActionType.NAVIGATE, "a", "nav_link", "nav_security", "/console/vpc/security-groups", "Navigate to security groups dashboard"),
-                (ActionType.SCROLL, "div", "item_card", "group_table", "scroll_down", "Scroll down to locate default VPC security group"),
-                (ActionType.CLICK, "button", "submit_btn", "edit_inbound_rules", "", "Click edit inbound rules button"),
-                (ActionType.API_CALL, "input", "search_bar", "rule_api", "authorize_ingress port=443 cidr=0.0.0.0/0", "Emit authorized ingress API update"),
-                (ActionType.FINISH, "button", "submit_btn", "save_rules", "saved", "Commit rule changes and terminate"),
-            ],
-        },
-        {
-            "domain": "booking",
-            "goal": "Search flights from SFO to JFK, select flight FL-382, and confirm booking for Alex Chen",
-            "steps": [
-                (ActionType.TYPE, "input", "origin_input", "origin_field", "SFO", "Enter departure airport"),
-                (ActionType.TYPE, "input", "dest_input", "dest_field", "JFK", "Enter arrival destination airport"),
-                (ActionType.CLICK, "button", "search_flights_btn", "search_btn", "", "Click search flights button"),
-                (ActionType.CLICK, "button", "select_flight_FL-382", "flight_card", "", "Select flight FL-382"),
-                (ActionType.TYPE, "input", "passenger_name_input", "name_field", "Alex Chen", "Enter passenger full name"),
-                (ActionType.CLICK, "button", "proceed_to_review_btn", "review_btn", "", "Proceed to booking review summary"),
-                (ActionType.CLICK, "button", "confirm_booking_btn", "confirm_btn", "", "Click confirm and complete booking"),
-                (ActionType.FINISH, "div", "confirmation_banner", "complete_marker", "confirmed", "Confirm reservation and terminate"),
-            ],
-        },
+        # 3. SaaS CRM & Sales
         {
             "domain": "crm",
-            "goal": "Create a new high-priority deal for Acme Corp with value 50000 in CRM pipeline",
-            "steps": [
-                (ActionType.CLICK, "button", "create_deal_btn", "new_deal_btn", "", "Open deal creation modal"),
-                (ActionType.TYPE, "input", "deal_company_input", "company_field", "Acme Corp", "Enter client company name"),
-                (ActionType.TYPE, "input", "deal_value_input", "value_field", "50000", "Enter deal estimated revenue value"),
-                (ActionType.CLICK, "button", "save_deal_btn", "save_btn", "", "Save deal to pipeline"),
-                (ActionType.FINISH, "div", "deal_card", "finish_marker", "saved", "Verify deal added to pipeline and finish"),
+            "archetype": "SaaS CRM & Sales",
+            "goal_fn": lambda r: f"Review existing account {r['d1']} with ARR ${r['d2']}; create new expansion deal for client {r['target']} valued at ${r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["Datadog LLC", "Stripe Inc", "Snowflake Corp", "Cloudflare Inc", "HubSpot"]),
+                "d1": rng.choice(["Acme Legacy Corp", "Global Retail Ltd", "Pied Piper"]),
+                "d2": rng.choice(["25000", "40000", "15000"]),
+                "d3": rng.choice(["85000", "120000", "95000", "150000"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.CLICK, "button", "create_btn", "new_deal_button", "", "Open deal creation form"),
+                (ActionType.TYPE, "input", "deal_company_input", "company_name_field", e["target"], f"Type company account name {e['target']}"),
+                (ActionType.CLICK, "button", "save_btn", "save_deal_button", "", "Save deal record to pipeline"),
+                (ActionType.FINISH, "div", "deal_card", "deal_created_status", "saved", "Verify deal registered"),
             ],
         },
+        # 4. Cloud Admin & DevOps
         {
             "domain": "cloud_admin",
-            "goal": "Terminate stale compute instance i-0a89bc and confirm with DELETE in cloud console",
-            "steps": [
-                (ActionType.CLICK, "button", "select_vpc_vpc-prod", "vpc_select", "", "Select production VPC"),
-                (ActionType.CLICK, "button", "terminate_i-0a89bc", "terminate_btn", "", "Click terminate instance button"),
-                (ActionType.TYPE, "input", "confirm_input", "modal_input", "DELETE", "Type DELETE to confirm instance termination"),
-                (ActionType.CLICK, "button", "confirm_delete_btn", "confirm_btn", "", "Confirm instance deletion"),
-                (ActionType.FINISH, "div", "status_banner", "finish_marker", "terminated", "Verify termination and complete task"),
+            "archetype": "Cloud Admin & DevOps",
+            "goal_fn": lambda r: f"Preserve active cluster {r['d1']} in region {r['d2']}; terminate decommissioned instance {r['target']} confirming with {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["i-0a89bc32", "i-0f44e912", "i-0c77aa55", "i-0d3388bb"]),
+                "d1": rng.choice(["k8s-prod-primary", "db-read-replica-3", "edge-ingress-pool"]),
+                "d2": rng.choice(["us-east-1", "eu-central-1", "us-west-2"]),
+                "d3": rng.choice(["TERMINATE", "DELETE_CONFIRM", "FORCE_SHUTDOWN"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.CLICK, "button", "nav_link", "instances_tab", "", "Open compute instances list"),
+                (ActionType.TYPE, "input", "search_bar", "instance_filter_input", e["target"], f"Filter list by instance ID {e['target']}"),
+                (ActionType.CLICK, "button", "terminate_btn", "terminate_action_button", "", "Initiate instance termination"),
+                (ActionType.FINISH, "div", "status_banner", "instance_terminated_banner", "terminated", "Verify instance decommissioned"),
             ],
         },
+        # 5. Productivity & Workspace
         {
-            "domain": "web_browser",
-            "goal": "Accept cookie consent overlay and navigate to Docs page",
-            "steps": [
-                (ActionType.CLICK, "button", "accept_cookies_btn", "cookie_btn", "", "Dismiss cookie consent popup modal"),
-                (ActionType.CLICK, "a", "nav_to_docs", "docs_link", "", "Click Docs navigation hyperlink"),
-                (ActionType.FINISH, "h1", "page_title", "finish_marker", "success", "Confirm Docs page rendered and complete"),
+            "domain": "productivity",
+            "archetype": "Productivity & Workspace",
+            "goal_fn": lambda r: f"Archive obsolete draft {r['d1']} in folder {r['d2']}; share project document {r['target']} with collaborator {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["Q4 Strategy Roadmap", "Annual Security Audit", "Core Architecture Spec", "Customer Journey Map"]),
+                "d1": rng.choice(["Old Notes 2024", "Meeting Scratchpad", "Temp Budget"]),
+                "d2": rng.choice(["Archive/Drafts", "Personal/Temp", "Scratch/Old"]),
+                "d3": rng.choice(["jordan@company.internal", "taylor@domain.org", "sam@workspace.net"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.CLICK, "a", "nav_link", "documents_workspace_link", "", "Open workspace files directory"),
+                (ActionType.TYPE, "input", "search_bar", "document_search_input", e["target"], f"Locate document {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "share_document_button", "", "Open share dialog"),
+                (ActionType.FINISH, "div", "modal_content", "share_success_toast", "shared", "Confirm document shared"),
             ],
         },
+        # 6. Fintech & Banking
         {
-            "domain": "ecommerce",
-            "goal": "Apply promo coupon SAVE20 in cart and proceed to checkout",
-            "steps": [
-                (ActionType.CLICK, "button", "view_cart_btn", "cart_btn", "", "Open shopping cart view"),
-                (ActionType.TYPE, "input", "coupon_input", "coupon_field", "SAVE20", "Type discount coupon code"),
-                (ActionType.CLICK, "button", "apply_coupon_btn", "apply_btn", "", "Apply coupon code"),
-                (ActionType.CLICK, "button", "proceed_checkout_btn", "checkout_btn", "", "Proceed to secure checkout"),
-                (ActionType.FINISH, "div", "order_review", "finish_marker", "checkout_ready", "Complete checkout initiation"),
+            "domain": "fintech",
+            "archetype": "Fintech & Banking",
+            "goal_fn": lambda r: f"Checking account balance is ${r['d1']}; transfer funds to recipient {r['target']} with memo {r['d2']} routing code {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["Apex Holdings", "Vanguard Escrow", "Horizon Capital", "Starlight Partners"]),
+                "d1": rng.choice(["48200.50", "73150.00", "92400.25"]),
+                "d2": rng.choice(["Invoice #9901", "Legal Retainer", "Quarterly Rent"]),
+                "d3": rng.choice(["021000021", "121000358", "071000013"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.CLICK, "button", "nav_link", "transfer_funds_tab", "", "Open transfer payments menu"),
+                (ActionType.TYPE, "input", "search_bar", "recipient_name_field", e["target"], f"Enter verified recipient {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "confirm_transfer_button", "", "Submit transfer request"),
+                (ActionType.FINISH, "div", "status_banner", "transfer_receipt_card", "transferred", "Verify fund transfer receipt"),
             ],
         },
+        # 7. Customer Support & Helpdesk
+        {
+            "domain": "customer_support",
+            "archetype": "Customer Support",
+            "goal_fn": lambda r: f"Closed ticket #{r['d1']} was low priority; escalate urgent incident #{r['target']} reported by user {r['d2']} category {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["INC-4892", "INC-7703", "INC-9124", "INC-3381"]),
+                "d1": rng.choice(["TIC-1022", "TIC-2041", "TIC-3099"]),
+                "d2": rng.choice(["morgan.reed@tech.io", "claire.bennett@cloud.org", "arthur.dent@galaxy.net"]),
+                "d3": rng.choice(["Billing Gateway", "SSO Auth Outage", "Data Sync Failure"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "ticket_lookup_field", e["target"], f"Search for incident ticket {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "search_ticket_button", "", "Submit ticket lookup query"),
+                (ActionType.CLICK, "button", "item_card", "escalate_priority_button", "", "Escalate ticket priority to urgent"),
+                (ActionType.FINISH, "div", "status_banner", "escalation_toast", "escalated", "Confirm incident escalated"),
+            ],
+        },
+        # 8. Auth & Settings
+        {
+            "domain": "auth_settings",
+            "archetype": "Auth & Settings",
+            "goal_fn": lambda r: f"Revoke deprecated token {r['d1']}; generate new scoped service API key {r['target']} for service {r['d2']} expiration {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["billing-sync-worker", "telemetry-collector", "backup-daemon", "auth-proxy"]),
+                "d1": rng.choice(["legacy-api-key-2023", "temp-read-token", "staging-debug-key"]),
+                "d2": rng.choice(["prod-payment-svc", "analytics-aggregator", "metrics-exporter"]),
+                "d3": rng.choice(["90 days", "180 days", "1 year"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.CLICK, "a", "nav_link", "api_tokens_link", "", "Navigate to API tokens configuration"),
+                (ActionType.TYPE, "input", "search_bar", "token_name_field", e["target"], f"Enter service token name {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "generate_token_button", "", "Click generate token button"),
+                (ActionType.FINISH, "div", "modal_content", "token_created_modal", "created", "Confirm key created"),
+            ],
+        },
+        # 9. Content Portals & CMS
+        {
+            "domain": "content_portals",
+            "archetype": "Content Portals & CMS",
+            "goal_fn": lambda r: f"Disregard rejected draft {r['d1']}; publish approved article {r['target']} author {r['d2']} tag {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["Modern Web Architecture", "AI Agent Security 2026", "Scaling Recurrent Models", "Database Sharding"]),
+                "d1": rng.choice(["Draft Untitled 4", "Test Post Alpha", "Raw Notes"]),
+                "d2": rng.choice(["Dr. Aris Thorne", "Dr. Maya Patel", "Prof. Liam Scott"]),
+                "d3": rng.choice(["Engineering", "Research", "Systems"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.CLICK, "button", "nav_link", "articles_dashboard_btn", "", "Open articles list"),
+                (ActionType.TYPE, "input", "search_bar", "title_search_field", e["target"], f"Search for article title {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "publish_article_button", "", "Publish article"),
+                (ActionType.FINISH, "div", "status_banner", "published_status_card", "published", "Verify article live"),
+            ],
+        },
+        # 10. Healthcare Scheduling
+        {
+            "domain": "healthcare",
+            "archetype": "Healthcare Scheduling",
+            "goal_fn": lambda r: f"Cancel tentative checkup with Dr. {r['d1']}; book specialist consultation with Dr. {r['target']} clinic {r['d2']} slot {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["Katherine Brooks", "Jonathan Vance", "Grace Holloway", "Raymond Castillo"]),
+                "d1": rng.choice(["Oldman", "Miller", "Harrison"]),
+                "d2": rng.choice(["Downtown Medical Center", "North Valley Specialty Clinic", "Westside Health"]),
+                "d3": rng.choice(["10:30 AM", "2:15 PM", "4:00 PM"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "physician_name_input", e["target"], f"Enter physician name Dr. {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "search_physician_button", "", "Search physician schedule"),
+                (ActionType.CLICK, "button", "item_card", "select_time_slot_button", "", "Select appointment slot"),
+                (ActionType.FINISH, "div", "checkout_btn", "appointment_confirmed_banner", "scheduled", "Confirm medical consultation"),
+            ],
+        },
+        # 11. Logistics & Fleet Tracking
+        {
+            "domain": "logistics",
+            "archetype": "Logistics & Fleet Tracking",
+            "goal_fn": lambda r: f"Delivered package was #{r['d1']} origin {r['d2']}; track in-transit freight container {r['target']} carrier {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["CONT-99421-US", "CONT-88102-EU", "CONT-77319-AP", "CONT-66204-GL"]),
+                "d1": rng.choice(["PKG-10492", "PKG-33910", "PKG-84912"]),
+                "d2": rng.choice(["Port of Oakland", "Long Beach Terminal", "Rotterdam Hub"]),
+                "d3": rng.choice(["Maersk Line", "Evergreen Marine", "Hapag-Lloyd"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "container_search_field", e["target"], f"Enter container tracking number {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "track_shipment_button", "", "Execute container tracking query"),
+                (ActionType.SCROLL, "div", "item_card", "manifest_details_panel", "scroll_down", "Scroll shipment manifest details"),
+                (ActionType.FINISH, "div", "status_banner", "customs_cleared_badge", "tracked", "Verify shipment tracking status"),
+            ],
+        },
+        # 12. HR & Recruiting
+        {
+            "domain": "recruiting",
+            "archetype": "HR & Recruiting",
+            "goal_fn": lambda r: f"Archived applicant {r['d1']} was rejected; schedule final technical interview for candidate {r['target']} role {r['d2']} room {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["Sophia Hernandez", "Dmitri Volkov", "Aisha Al-Mansoor", "Gabriel Santos"]),
+                "d1": rng.choice(["John Doe 2023", "Test Candidate B", "Unqualified Sample"]),
+                "d2": rng.choice(["Senior ML Engineer", "Distributed Systems Lead", "Principal Agent Architect"]),
+                "d3": rng.choice(["Virtual Room 4", "Conference Hall B", "Executive Suite 10"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "candidate_name_field", e["target"], f"Type candidate name {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "filter_candidates_button", "", "Filter candidate applications"),
+                (ActionType.CLICK, "button", "item_card", "schedule_interview_button", "", "Open interview scheduler"),
+                (ActionType.FINISH, "div", "checkout_btn", "invitation_sent_toast", "scheduled", "Confirm candidate interview invitation"),
+            ],
+        },
+        # 13. Real Estate Listings
+        {
+            "domain": "real_estate",
+            "archetype": "Real Estate Listings",
+            "goal_fn": lambda r: f"Past rented property was #{r['d1']} in {r['d2']}; schedule virtual property tour for listing {r['target']} budget ${r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["742 Evergreen Terrace", "1004 Mountain View Ave", "88 Ocean Boulevard", "450 Skyline Court"]),
+                "d1": rng.choice(["MLS-99120", "MLS-44019", "MLS-33104"]),
+                "d2": rng.choice(["Springfield", "Oakland", "San Jose"]),
+                "d3": rng.choice(["1250000", "890000", "2100000"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "address_search_input", e["target"], f"Search address {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "search_properties_button", "", "Search properties"),
+                (ActionType.CLICK, "button", "item_card", "schedule_tour_button", "", "Schedule property tour"),
+                (ActionType.FINISH, "div", "status_banner", "tour_scheduled_banner", "scheduled", "Confirm tour appointment"),
+            ],
+        },
+        # 14. University Course Registration
+        {
+            "domain": "education",
+            "archetype": "University Course Registration",
+            "goal_fn": lambda r: f"Completed prerequisite {r['d1']} grade {r['d2']}; register student for advanced course {r['target']} section {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["CS-4820 Artificial Intelligence", "ECE-6250 Distributed Systems", "MATH-5140 Real Analysis", "CS-5300 Compilers"]),
+                "d1": rng.choice(["CS-2110 OOP", "MATH-2940 Linear Algebra", "CS-3110 Data Structures"]),
+                "d2": rng.choice(["A", "A+", "A-"]),
+                "d3": rng.choice(["SEC-001", "SEC-002", "SEC-004"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "course_catalog_input", e["target"], f"Lookup course {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "search_courses_button", "", "Search course catalog"),
+                (ActionType.CLICK, "button", "item_card", "add_to_schedule_button", "", "Add course to semester schedule"),
+                (ActionType.FINISH, "div", "checkout_btn", "registration_confirmed_card", "enrolled", "Confirm course enrollment"),
+            ],
+        },
+        # 15. Insurance Claims
+        {
+            "domain": "insurance",
+            "archetype": "Insurance Claims",
+            "goal_fn": lambda r: f"Expired policy was #{r['d1']} deductible ${r['d2']}; submit claim for active commercial policy {r['target']} incident #{r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["POL-9924-COMM", "POL-7718-IND", "POL-5542-FLEET", "POL-3301-PROP"]),
+                "d1": rng.choice(["OLD-0021-EXP", "OLD-9481-VOID", "OLD-5510-CAN"]),
+                "d2": rng.choice(["500", "1000", "2500"]),
+                "d3": rng.choice(["INC-2026-9901", "INC-2026-8842", "INC-2026-7731"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "policy_number_field", e["target"], f"Enter active policy number {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "verify_policy_button", "", "Verify insurance policy"),
+                (ActionType.CLICK, "button", "item_card", "file_claim_button", "", "Submit claim documentation"),
+                (ActionType.FINISH, "div", "status_banner", "claim_received_toast", "filed", "Confirm insurance claim filing"),
+            ],
+        },
+        # 16. Restaurant Reservations
+        {
+            "domain": "restaurant",
+            "archetype": "Restaurant Reservations",
+            "goal_fn": lambda r: f"Previous cancelled reservation was at {r['d1']} party {r['d2']}; book table at {r['target']} time {r['d3']} party of {r['d4']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["L'Atelier Bistro", "Noma Harbor", "Osteria Francescana", "Le Bernardin", "Per Se"]),
+                "d1": rng.choice(["Cafe Bella", "Burger Shack", "Taco Stand"]),
+                "d2": rng.choice(["2", "3", "5"]),
+                "d3": rng.choice(["7:30 PM", "8:00 PM", "6:45 PM"]),
+                "d4": rng.choice(["4", "6", "8"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "restaurant_name_input", e["target"], f"Search dining venue {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "find_tables_button", "", "Find available tables"),
+                (ActionType.CLICK, "button", "item_card", "reserve_table_button", "", "Select table reservation"),
+                (ActionType.FINISH, "div", "checkout_btn", "reservation_confirmed_banner", "reserved", "Confirm table booking"),
+            ],
+        },
+        # 17. Media Streaming & Playlists
+        {
+            "domain": "streaming",
+            "archetype": "Media Streaming",
+            "goal_fn": lambda r: f"Skip disliked album {r['d1']} by artist {r['d2']}; add featured album {r['target']} to collection #{r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["Midnight Echoes", "Quantum Symphony", "Neon Horizons", "Celestial Drift"]),
+                "d1": rng.choice(["Unreleased Demo", "Rough Draft 2", "Noise Experiment"]),
+                "d2": rng.choice(["The Static", "Null Pointer", "Zero Signal"]),
+                "d3": rng.choice(["Favorites", "Chill Weekend", "Focus Ambient"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "media_search_input", e["target"], f"Type album title {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "search_music_button", "", "Search music catalog"),
+                (ActionType.CLICK, "button", "item_card", "add_to_playlist_button", "", "Add album to playlist"),
+                (ActionType.FINISH, "div", "status_banner", "playlist_updated_toast", "saved", "Verify media playlist updated"),
+            ],
+        },
+        # 18. Bug Trackers & Issue Boards
+        {
+            "domain": "bug_tracker",
+            "archetype": "Bug Trackers & Issue Boards",
+            "goal_fn": lambda r: f"Closed ticket was #{r['d1']} component {r['d2']}; triage critical bug #{r['target']} sprint {r['d3']} assignee {r['d4']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["BUG-9021", "BUG-8840", "BUG-7715", "BUG-6623"]),
+                "d1": rng.choice(["BUG-1011", "BUG-2022", "BUG-3033"]),
+                "d2": rng.choice(["css-padding", "tooltip-typo", "readme-link"]),
+                "d3": rng.choice(["Sprint 42", "Sprint 43", "Q4 Hardening"]),
+                "d4": rng.choice(["alex.c", "maria.g", "sam.k"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "issue_key_input", e["target"], f"Search issue ticket {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "search_issues_button", "", "Search issue board"),
+                (ActionType.CLICK, "button", "item_card", "assign_sprint_button", "", "Assign issue to active sprint"),
+                (ActionType.FINISH, "div", "status_banner", "issue_triaged_badge", "triaged", "Confirm issue triaged"),
+            ],
+        },
+        # 19. Analytics Dashboards
+        {
+            "domain": "analytics",
+            "archetype": "Analytics Dashboards",
+            "goal_fn": lambda r: f"Baseline conversion was {r['d1']}% in segment {r['d2']}; export analytics report for metric {r['target']} period {r['d3']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["Daily Active Users", "Net Churn Rate", "Average Order Value", "Checkout Dropoff"]),
+                "d1": rng.choice(["2.4", "3.1", "1.8"]),
+                "d2": rng.choice(["EMEA Enterprise", "APAC Mobile", "LATAM Self-Serve"]),
+                "d3": rng.choice(["Last 30 Days", "Current Quarter", "Trailing 12 Months"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.CLICK, "button", "nav_link", "metrics_dashboard_tab", "", "Open metrics dashboard"),
+                (ActionType.TYPE, "input", "search_bar", "metric_search_field", e["target"], f"Select analytical metric {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "export_csv_button", "", "Export metric report to CSV"),
+                (ActionType.FINISH, "div", "modal_content", "export_ready_toast", "exported", "Confirm data report export"),
+            ],
+        },
+        # 20. Inventory Management
+        {
+            "domain": "inventory",
+            "archetype": "Inventory Management",
+            "goal_fn": lambda r: f"Out-of-stock SKU was {r['d1']} aisle {r['d2']}; restock priority product SKU {r['target']} warehouse {r['d3']} quantity {r['d4']}",
+            "entities_fn": lambda rng: {
+                "target": rng.choice(["SKU-99402-A", "SKU-88319-B", "SKU-77201-C", "SKU-66104-D"]),
+                "d1": rng.choice(["SKU-0012-DISC", "SKU-0099-OBS", "SKU-0044-OLD"]),
+                "d2": rng.choice(["Aisle 4-B", "Shelf 12-C", "Bay 8"]),
+                "d3": rng.choice(["Main Distribution Center", "West Coast Hub", "Northeast Depot"]),
+                "d4": rng.choice(["250", "500", "1200"]),
+            },
+            "steps_fn": lambda e: [
+                (ActionType.TYPE, "input", "search_bar", "sku_lookup_input", e["target"], f"Enter product SKU identifier {e['target']}"),
+                (ActionType.CLICK, "button", "submit_btn", "search_inventory_button", "", "Search inventory stock"),
+                (ActionType.CLICK, "button", "item_card", "restock_order_button", "", "Create restock purchase order"),
+                (ActionType.FINISH, "div", "status_banner", "reorder_confirmed_banner", "restocked", "Confirm inventory restock order"),
+            ],
+        },
+    ]
+
+    # Backward compatibility alias
+    SCENARIOS = ARCHETYPES
+
+    # Realistic Web Scaffolds for DOM Grafting (Guardrail 2D)
+    DOM_SCAFFOLDS = [
+        "<header class='site-header bg-white shadow-sm'><nav class='flex items-center justify-between px-6 py-4'><a href='/' class='logo font-bold text-xl'>Portal</a><div class='nav-items flex gap-4 text-sm'><span>Overview</span><span>Documentation</span><span>Support</span></div></nav></header><main class='main-content container mx-auto px-4 py-8'>{content}</main><footer class='site-footer text-xs text-gray-500 text-center py-6 border-t'>&copy; 2026 Enterprise Systems Inc. All rights reserved.</footer>",
+        "<div class='app-layout flex h-screen'><aside class='sidebar w-64 bg-slate-900 text-white p-4'><div class='sidebar-header font-semibold text-lg mb-6'>Dashboard</div><nav class='space-y-2'><div class='nav-entry'>Home</div><div class='nav-entry'>Settings</div></nav></aside><div class='content-panel flex-1 overflow-auto p-6'><div class='panel-header mb-4 text-xl font-bold'>Workspace</div>{content}</div></div>",
+        "<div class='checkout-wrapper max-w-4xl mx-auto py-10'><div class='breadcrumb text-sm text-gray-400 mb-6'>Store &gt; Catalog &gt; Checkout</div><div class='grid grid-cols-1 md:grid-cols-3 gap-6'><div class='col-span-2 form-container'>{content}</div><div class='summary-panel bg-gray-50 p-6 rounded-lg border'><h3>Order Summary</h3><p class='text-sm'>Subtotal: $120.00</p></div></div></div>",
+        "<section class='booking-view max-w-5xl mx-auto my-8'><div class='tabs flex border-b mb-6'><button class='tab-item active font-medium py-2 px-4 border-b-2 border-blue-600'>Primary</button><button class='tab-item py-2 px-4 text-gray-500'>History</button></div><div class='view-body'>{content}</div></section>",
     ]
 
     def __init__(
@@ -241,8 +555,15 @@ class SyntheticTrajectoryGenerator:
         self.rng = random.Random(seed)
         self.tokenizer = tokenizer or ActionBPETokenizer(config.vocab_size)
 
-    def _generate_dom_tree(self, target_element_name: str, target_tag: str, target_role: str) -> Tuple[List[UIElement], UIElement]:
-        """Generates 6 to 12 realistic UI elements with non-overlapping bounding boxes in [0, 1]."""
+    def _generate_dom_tree(
+        self,
+        target_element_name: str,
+        target_tag: str,
+        target_role: str,
+        distractor_entities: Optional[List[str]] = None,
+        drop_id_class: bool = False,
+    ) -> Tuple[List[UIElement], UIElement]:
+        """Generates 6 to 12 realistic UI elements with bounded attributes, near-miss distractors, and optional attribute dropout."""
         num_elements = self.rng.randint(6, 10)
         elements: List[UIElement] = []
 
@@ -253,16 +574,35 @@ class SyntheticTrajectoryGenerator:
         target_y = self.rng.uniform(0.05, 0.95 - target_h)
         target_bbox = (target_x, target_y, target_x + target_w, target_y + target_h)
 
+        # Guardrail 2A: Sample realistic classes, test-ids, aria-labels from bounded pools
+        target_classes = " ".join(self.rng.sample(self.BOUNDED_CLASSES, k=self.rng.randint(1, 3)))
+        target_testid = self.rng.choice(self.BOUNDED_TEST_IDS)
+        target_aria = self.rng.choice(self.BOUNDED_ARIA_LABELS)
+
+        target_attrs = {
+            "class": target_classes,
+            "data-testid": target_testid,
+            "aria-label": target_aria,
+        }
+        if drop_id_class:
+            target_attrs["__drop_id_class__"] = True
+
         target_el = UIElement(
             element_id=0,
             tag=target_tag,
             role=target_role,
             text=target_element_name,
             bbox=target_bbox,
+            attributes=target_attrs,
+            is_clickable=(target_tag in ("button", "a") or target_role in ("button", "link")),
+            is_input=(target_tag in ("input", "textarea") or target_role in ("textbox", "searchbox")),
         )
         elements.append(target_el)
 
-        # Distractor elements
+        # Distractor elements with Guardrail 2A (bounded attributes) and Guardrail 2C (near-miss distractors)
+        distractor_pool = list(distractor_entities) if distractor_entities else []
+        self.rng.shuffle(distractor_pool)
+
         for i in range(1, num_elements):
             w = self.rng.uniform(0.08, 0.22)
             h = self.rng.uniform(0.03, 0.07)
@@ -270,8 +610,41 @@ class SyntheticTrajectoryGenerator:
             y = self.rng.uniform(0.02, 0.98 - h)
             tag = self.rng.choice(self.DOM_TAGS)
             role = self.rng.choice(self.ROLES)
-            text = f"element_{tag}_{role}_{i}"
-            elements.append(UIElement(element_id=i, tag=tag, role=role, text=text, bbox=(x, y, x + w, y + h)))
+
+            # Guardrail 2C: Inject near-miss distractor if available
+            distractor_val = None
+            if distractor_pool and (i <= len(distractor_pool) or self.rng.random() < 0.4):
+                dist_entity = distractor_pool[(i - 1) % len(distractor_pool)]
+                text = f"{dist_entity}"
+                distractor_val = dist_entity if tag in ("input", "textarea") else None
+            else:
+                text = f"{self.rng.choice(self.BOUNDED_ARIA_LABELS)} {i}"
+
+            classes = " ".join(self.rng.sample(self.BOUNDED_CLASSES, k=self.rng.randint(1, 2)))
+            testid = self.rng.choice(self.BOUNDED_TEST_IDS)
+            aria = self.rng.choice(self.BOUNDED_ARIA_LABELS)
+
+            attrs = {
+                "class": classes,
+                "data-testid": testid,
+                "aria-label": aria,
+            }
+            if drop_id_class:
+                attrs["__drop_id_class__"] = True
+
+            elements.append(
+                UIElement(
+                    element_id=i,
+                    tag=tag,
+                    role=role,
+                    text=text,
+                    value=distractor_val,
+                    bbox=(x, y, x + w, y + h),
+                    attributes=attrs,
+                    is_clickable=(tag in ("button", "a") or role in ("button", "link")),
+                    is_input=(tag in ("input", "textarea") or role in ("textbox", "searchbox")),
+                )
+            )
 
         self.rng.shuffle(elements)
         return elements, target_el
@@ -342,14 +715,26 @@ class SyntheticTrajectoryGenerator:
     def generate_trajectory(self, scenario_idx: Optional[int] = None, max_turns: Optional[int] = None) -> TrajectorySample:
         """
         Synthesizes a full multi-turn trajectory sample tau = (s_0, a_0, r_0, ..., s_T).
+        Supports 20+ domain archetypes, Guardrail 2A (bounded BPE CSS vocabulary),
+        Guardrail 2B (30% structural attribute dropout), Guardrail 2C (near-miss distractors),
+        and Guardrail 2D (DOM grafting mode on 25% of synthetic turns).
         """
         if scenario_idx is None:
-            scenario = self.rng.choice(self.SCENARIOS)
+            scenario = self.rng.choice(self.ARCHETYPES)
         else:
-            scenario = self.SCENARIOS[scenario_idx % len(self.SCENARIOS)]
+            scenario = self.ARCHETYPES[scenario_idx % len(self.ARCHETYPES)]
 
-        goal = scenario["goal"]
-        steps = scenario["steps"]
+        if "entities_fn" in scenario:
+            entities = scenario["entities_fn"](self.rng)
+            goal = scenario["goal_fn"](entities)
+            steps = scenario["steps_fn"](entities)
+            distractor_entities = [v for k, v in entities.items() if k.startswith("d")]
+        else:
+            entities = {}
+            goal = scenario["goal"]
+            steps = scenario["steps"]
+            distractor_entities = []
+
         if max_turns is not None:
             steps = steps[:max_turns]
 
@@ -358,10 +743,28 @@ class SyntheticTrajectoryGenerator:
 
         # Generate turns
         for turn_idx, (act_type, tag, role, el_name, arg_val, thought_tmpl) in enumerate(steps):
-            dom_elements, target_el = self._generate_dom_tree(el_name, tag, role)
+            # Guardrail 2B: 30% structural attribute dropout
+            drop_id_class = (self.rng.random() < 0.30)
+
+            # Guardrail 2D: DOM Grafting Mode on 25% of turns
+            graft_dom = (self.rng.random() < 0.25)
+
+            dom_elements, target_el = self._generate_dom_tree(
+                target_element_name=el_name,
+                target_tag=tag,
+                target_role=role,
+                distractor_entities=distractor_entities,
+                drop_id_class=drop_id_class,
+            )
 
             # Observation text: serialized DOM elements
-            dom_str = " ".join(el.to_dom_string() for el in dom_elements[:6])
+            core_dom_str = " ".join(el.to_dom_string(drop_id_class=drop_id_class) for el in dom_elements[:6])
+            if graft_dom:
+                scaffold = self.rng.choice(self.DOM_SCAFFOLDS)
+                dom_str = scaffold.replace("{content}", core_dom_str)
+            else:
+                dom_str = core_dom_str
+
             obs_text = f"Goal: {goal} | Screen State: {dom_str}"
 
             # Continuous observation embedding [hidden_dim] for JEPA world model
@@ -480,6 +883,7 @@ class TrajectoryBatch:
     images: Optional[torch.Tensor] = None  # [B, 3, H, W] screenshot images for visual grounding
     prompt_token_ids: Optional[torch.Tensor] = None  # [B, S_p] prompt token IDs for pointer copy
     prompt_mask: Optional[torch.Tensor] = None  # [B, S_p] boolean valid mask
+    source_mask: Optional[torch.Tensor] = None  # [B] 1 for REAL, 0 for SYNTH
 
     def to(self, device: torch.device, dtype: Optional[torch.dtype] = None) -> "TrajectoryBatch":
         """Transfers all internal batch tensors to target device and precision."""
@@ -501,6 +905,11 @@ class TrajectoryBatch:
             if self.prompt_mask is not None
             else None
         )
+        source_mask_tensor = (
+            self.source_mask.to(device=device)
+            if self.source_mask is not None
+            else None
+        )
         return TrajectoryBatch(
             input_ids=self.input_ids.to(device=device),
             attention_mask=attn_mask_tensor,
@@ -519,6 +928,7 @@ class TrajectoryBatch:
             images=images_tensor,
             prompt_token_ids=prompt_ids_tensor,
             prompt_mask=prompt_mask_tensor,
+            source_mask=source_mask_tensor,
         )
 
 
@@ -757,6 +1167,13 @@ class TrajectoryCollator:
         # Stack screenshot images: [B, 3, H, W]
         images_tensor = torch.stack(batch_images, dim=0) if batch_images else None
 
+        # Source domain flag: 1.0 for REAL, 0.0 for SYNTH (Guardrail 4A)
+        source_flags = [
+            1.0 if getattr(s, "is_real", False) or s.__class__.__name__ == "RealWebTrajectorySample" else 0.0
+            for s in samples
+        ]
+        source_mask_tensor = torch.tensor(source_flags, dtype=torch.float32)
+
         return TrajectoryBatch(
             input_ids=padded_input_ids,
             attention_mask=attention_mask,
@@ -775,4 +1192,5 @@ class TrajectoryCollator:
             images=images_tensor,
             prompt_token_ids=padded_prompt_token_ids,
             prompt_mask=padded_prompt_mask,
+            source_mask=source_mask_tensor,
         )

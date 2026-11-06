@@ -865,10 +865,10 @@ def evaluate_offline_dataset(
                 break
             t_start = time.perf_counter()
 
-            turn_elements = (
-                getattr(turn, "dom_elements", None)
+            candidate_elements = (
+                getattr(turn, "elements", None)
                 or getattr(turn, "interactive_elements", None)
-                or getattr(turn, "elements", None)
+                or getattr(turn, "dom_elements", None)
             )
 
             # Execute agent step
@@ -876,7 +876,7 @@ def evaluate_offline_dataset(
                 obs_text=turn.obs_text,
                 obs_features=turn.obs_features,
                 screenshot=getattr(turn, "screenshot", None),
-                candidate_elements=turn_elements,
+                candidate_elements=candidate_elements,
             )
 
             latency_ms = (time.perf_counter() - t_start) * 1000.0
@@ -888,14 +888,22 @@ def evaluate_offline_dataset(
 
             # Find matching UI element bbox if available
             target_bbox: Optional[Tuple[float, float, float, float]] = None
-            elements = turn_elements or []
-            for el in elements:
-                if getattr(el, "bbox", None) is not None and len(el.bbox) == 4:
-                    # If coordinate falls inside bbox, use as target
-                    bx_min, by_min, bx_max, by_max = el.bbox
-                    if bx_min <= gt_coords[0] <= bx_max and by_min <= gt_coords[1] <= by_max:
+            elements = candidate_elements or []
+            target_id = getattr(turn, "target_element_id", None)
+            if target_id is not None:
+                for el in elements:
+                    if getattr(el, "element_id", None) == target_id and getattr(el, "bbox", None) is not None:
                         target_bbox = el.bbox
                         break
+
+            if target_bbox is None:
+                for el in elements:
+                    if getattr(el, "bbox", None) is not None and len(el.bbox) == 4:
+                        # If coordinate falls inside bbox, use as target
+                        bx_min, by_min, bx_max, by_max = el.bbox
+                        if bx_min <= gt_coords[0] <= bx_max and by_min <= gt_coords[1] <= by_max:
+                            target_bbox = el.bbox
+                            break
 
             sm = evaluator.evaluate_step(
                 turn_id=turn_idx,

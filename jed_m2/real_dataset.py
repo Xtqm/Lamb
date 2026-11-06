@@ -1660,6 +1660,12 @@ class RealTrajectoryCollator:
             prompt_ids_tensor[b, :p_len] = torch.tensor(all_prompt_tokens[b], dtype=torch.long)
             prompt_mask_tensor[b, :p_len] = True
 
+        source_flags = [
+            1.0 if getattr(s, "is_real", False) or s.__class__.__name__ == "RealWebTrajectorySample" else 0.0
+            for s in samples
+        ]
+        source_mask_tensor = torch.tensor(source_flags, dtype=torch.float32)
+
         return TrajectoryBatch(
             input_ids=input_ids_tensor,
             attention_mask=attn_bias,
@@ -1678,6 +1684,7 @@ class RealTrajectoryCollator:
             images=None,
             prompt_token_ids=prompt_ids_tensor,
             prompt_mask=prompt_mask_tensor,
+            source_mask=source_mask_tensor,
         )
 
 

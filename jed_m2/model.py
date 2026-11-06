@@ -144,6 +144,7 @@ class JEDM2Block(nn.Module):
         self,
         x: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        source_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Sequence forward pass for JEDM2Block.
@@ -151,6 +152,7 @@ class JEDM2Block(nn.Module):
         Args:
             x: Input tensor of shape [batch_size, seq_len, hidden_dim].
             attention_mask: Optional attention mask for Attention.
+            source_mask: Optional per-source flag for MoE balancing (Guardrail 4A).
 
         Returns:
             Tuple of:
@@ -172,7 +174,7 @@ class JEDM2Block(nn.Module):
             ffn_out = self.ffn(self.norm_ffn(x))
             aux_loss = torch.zeros((), device=x.device, dtype=x.dtype)
         else:
-            ffn_out, aux_loss = self.ffn(self.norm_ffn(x))
+            ffn_out, aux_loss = self.ffn(self.norm_ffn(x), source_mask=source_mask)
         x = x + ffn_out
 
         return x, aux_loss
@@ -400,6 +402,7 @@ class JEDM2Model(nn.Module):
         prompt_hidden: Optional[torch.Tensor] = None,
         prompt_ids: Optional[torch.Tensor] = None,
         prompt_mask: Optional[torch.Tensor] = None,
+        source_mask: Optional[torch.Tensor] = None,
     ) -> JEDM2Output:
         """
         Sequence-parallel forward pass for training and verification.
@@ -417,6 +420,10 @@ class JEDM2Model(nn.Module):
             visual_tokens_t: Optional JEPA visual patch tokens at time t [batch_size, N_v, hidden_dim].
             visual_tokens_next: Optional JEPA visual patch tokens at time t+1 [batch_size, N_v, hidden_dim].
             return_all_tokens: If True, returns lm_logits/hidden_states over entire concatenated sequence.
+            prompt_hidden: Optional prompt context representations for copy head.
+            prompt_ids: Optional prompt token IDs for pointer copy distribution.
+            prompt_mask: Optional boolean mask over prompt tokens.
+            source_mask: Optional per-source flag for MoE balancing (Guardrail 4A).
 
         Returns:
             JEDM2Output container with LM logits, action predictions, hidden states,
@@ -472,10 +479,11 @@ class JEDM2Model(nn.Module):
                     block,
                     x,
                     attention_mask,
+                    source_mask,
                     use_reentrant=False,
                 )
             else:
-                x, aux_loss = block(x, attention_mask=attention_mask)
+                x, aux_loss = block(x, attention_mask=attention_mask, source_mask=source_mask)
             total_aux_loss = total_aux_loss + aux_loss
 
         # Normalize final hidden states: [B, S_total, hidden_dim]
@@ -491,12 +499,29 @@ class JEDM2Model(nn.Module):
         lm_logits = self.lm_head(h_text)
 
         # System 1: Dual-system action heads with visual grounding and prompt conditioning
+        # Automatically condition pointer-generator copy head on input context tokens
+        effective_prompt_ids = prompt_ids
+        effective_prompt_hidden = prompt_hidden
+        effective_prompt_mask = prompt_mask
+
+        if effective_prompt_ids is None and input_ids is not None:
+            effective_prompt_ids = input_ids
+            effective_prompt_hidden = h_text
+            num_special = getattr(self.config, "num_special_tokens", 11)
+            effective_prompt_mask = (input_ids >= num_special) & (input_ids < self.config.vocab_size)
+        elif effective_prompt_ids is not None and effective_prompt_hidden is None:
+            S_p = effective_prompt_ids.shape[1]
+            if h_text.shape[1] >= S_p:
+                effective_prompt_hidden = h_text[:, :S_p, :]
+            else:
+                effective_prompt_hidden = self.tok_embeddings(effective_prompt_ids)
+
         action_output = self.action_head(
             h_text,
             visual_tokens=visual_tokens,
-            prompt_hidden=prompt_hidden,
-            prompt_ids=prompt_ids,
-            prompt_mask=prompt_mask,
+            prompt_hidden=effective_prompt_hidden,
+            prompt_ids=effective_prompt_ids,
+            prompt_mask=effective_prompt_mask,
         )
 
         # JEPA World Model evaluation: connect directly to contextual backbone representations

@@ -33,6 +33,7 @@ class JEDM2LossConfig:
     action_type_weight: float = 2.0  # Weight for discrete primitive classification
     coord_weight: float = 12.0  # Weight for continuous (x, y) spatial coordinates
     arg_weight: float = 8.0  # Calibrated weight for argument token prediction (effective scale ~0.89 vs 0.22 legacy)
+    gate_aux_weight: float = 1.0  # Weight for auxiliary binary supervision on copy gate g_t
     jepa_weight: float = 1.0  # Weight for JEPA latent world model consistency
     aux_weight: float = 1.0  # Weight for MoE load-balancing auxiliary loss
     finish_action_weight: float = 2.5  # Class weighting factor for ActionType.FINISH
@@ -208,6 +209,7 @@ class JEDM2CompositeLoss(nn.Module):
         shift_arg_labels = batch.input_ids[:, 1:].contiguous()  # [B, S-1]
         shift_arg_mask = batch.arg_loss_mask[:, 1:].contiguous()  # [B, S-1]
 
+        loss_gate_aux = torch.zeros((), device=device, dtype=dtype)
         if shift_arg_mask.any():
             valid_arg_logits = shift_arg_logits[shift_arg_mask]  # [N_args, vocab_size]
             valid_arg_targets = shift_arg_labels[shift_arg_mask]  # [N_args]
@@ -224,6 +226,25 @@ class JEDM2CompositeLoss(nn.Module):
                 loss_arg = raw_loss_arg / math.log(max(2, vocab_size))
             else:
                 loss_arg = raw_loss_arg
+
+            # Auxiliary binary supervision on g_t (alpha) whenever ground-truth token appears verbatim in prompt context
+            alpha = getattr(model_output.action_output, "alpha", None)
+            prompt_ids = getattr(batch, "prompt_token_ids", None)
+            if alpha is not None and prompt_ids is not None:
+                shift_alpha = alpha[:, :-1, :].contiguous()  # [B, S-1, 1]
+                valid_alpha = shift_alpha[shift_arg_mask].squeeze(-1).float()  # [N_args] in [0, 1]
+
+                # Map each valid argument position to its batch index
+                b_indices = torch.arange(b_sz, device=device).unsqueeze(1).expand(-1, seq_len - 1)[shift_arg_mask]
+                prompts_for_args = prompt_ids[b_indices]  # [N_args, S_p]
+
+                # Check whether the target token appears verbatim in prompt context
+                in_prompt = (prompts_for_args == valid_arg_targets.unsqueeze(-1)).any(dim=-1)  # [N_args] (bool)
+                if in_prompt.any():
+                    # When target token is in prompt, model should copy: target g_t = 0.0
+                    copy_alphas = valid_alpha[in_prompt]
+                    targets = torch.zeros_like(copy_alphas)
+                    loss_gate_aux = F.binary_cross_entropy(copy_alphas.clamp(1e-7, 1.0 - 1e-7), targets)
         else:
             loss_arg = 0.0 * argument_logits.sum()
 
@@ -249,6 +270,7 @@ class JEDM2CompositeLoss(nn.Module):
             + cfg.action_type_weight * loss_type
             + cfg.coord_weight * loss_coord
             + cfg.arg_weight * loss_arg
+            + getattr(cfg, "gate_aux_weight", 1.0) * loss_gate_aux
             + cfg.jepa_weight * loss_jepa
             + cfg.aux_weight * loss_aux
         )
@@ -258,6 +280,7 @@ class JEDM2CompositeLoss(nn.Module):
             "loss_total": total_loss.item(),
             "loss_reason": loss_reason.item(),
             "loss_gate": loss_gate.item(),
+            "loss_gate_aux": loss_gate_aux.item(),
             "loss_action_type": loss_type.item(),
             "loss_coord": loss_coord.item(),
             "loss_arg": loss_arg.item(),

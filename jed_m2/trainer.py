@@ -285,10 +285,27 @@ class JEDM2Trainer:
                 obs_t=batch.jepa_obs_t,
                 action_t=batch.jepa_action_t,
                 obs_next=batch.jepa_obs_next,
+                prompt_ids=getattr(batch, "prompt_token_ids", None),
+                prompt_mask=getattr(batch, "prompt_mask", None),
+                source_mask=getattr(batch, "source_mask", None),
             )
 
             # Evaluate composite multi-task loss
             total_loss, metrics = self.loss_fn(output, batch)
+
+            # Extract MoE routing entropy diagnostics across layers (Guardrail 4A)
+            ent_real, ent_synth = [], []
+            for block in getattr(self.model, "blocks", []):
+                moe = getattr(block, "moe", None) or getattr(block, "ffn", None)
+                if hasattr(moe, "last_routing_stats") and moe.last_routing_stats:
+                    if "entropy_real" in moe.last_routing_stats:
+                        ent_real.append(moe.last_routing_stats["entropy_real"])
+                    if "entropy_synth" in moe.last_routing_stats:
+                        ent_synth.append(moe.last_routing_stats["entropy_synth"])
+            if ent_real:
+                metrics["moe_entropy_real"] = sum(ent_real) / len(ent_real)
+            if ent_synth:
+                metrics["moe_entropy_synth"] = sum(ent_synth) / len(ent_synth)
 
         # Scale loss by accumulation factor for backward pass
         scaled_loss = total_loss / self.config.grad_accum_steps
@@ -348,10 +365,27 @@ class JEDM2Trainer:
                 obs_t=batch.jepa_obs_t,
                 action_t=batch.jepa_action_t,
                 obs_next=batch.jepa_obs_next,
+                prompt_ids=getattr(batch, "prompt_token_ids", None),
+                prompt_mask=getattr(batch, "prompt_mask", None),
+                source_mask=getattr(batch, "source_mask", None),
             )
 
             # Evaluate composite multi-task loss and diagnostic metrics
             total_loss, metrics = self.loss_fn(output, batch)
+
+            # Extract MoE routing entropy diagnostics across layers (Guardrail 4A)
+            ent_real, ent_synth = [], []
+            for block in getattr(self.model, "blocks", []):
+                moe = getattr(block, "moe", None) or getattr(block, "ffn", None)
+                if hasattr(moe, "last_routing_stats") and moe.last_routing_stats:
+                    if "entropy_real" in moe.last_routing_stats:
+                        ent_real.append(moe.last_routing_stats["entropy_real"])
+                    if "entropy_synth" in moe.last_routing_stats:
+                        ent_synth.append(moe.last_routing_stats["entropy_synth"])
+            if ent_real:
+                metrics["moe_entropy_real"] = sum(ent_real) / len(ent_real)
+            if ent_synth:
+                metrics["moe_entropy_synth"] = sum(ent_synth) / len(ent_synth)
 
         loss_val = total_loss.item()
         return loss_val, metrics
